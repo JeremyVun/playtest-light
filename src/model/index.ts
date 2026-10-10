@@ -1,4 +1,4 @@
-import type { Config, Model, ModelThread, ToolSpec } from '../types.ts';
+import type { Config, Model } from '../types.ts';
 
 export type OpenModelOptions = {
   env?: Record<string, string | undefined>;
@@ -9,24 +9,23 @@ export type OpenModelOptions = {
 export function openModel(config: Config['model'], options: OpenModelOptions = {}): Model {
   const env = options.env ?? process.env;
   const selector = env.PLAYTEST_MODEL;
-  if (selector !== undefined && selector !== '' && !selector.startsWith('script:'))
+  if (selector !== undefined && selector !== '' && (!selector.startsWith('script:') || !selector.slice('script:'.length).trim()))
     throw new Error(`PLAYTEST_MODEL must be script:<file>, got "${selector}"`);
   const script = selector?.slice('script:'.length);
   if (script) {
     const transcript = env.PLAYTEST_MODEL_TRANSCRIPT || undefined;
-    return lazy(`script:${script}`, async () => (await import('./script.ts')).ScriptModel.fromFile(script, transcript));
+    let model: Promise<Model> | undefined;
+    return {
+      name: `script:${script}`,
+      startThread(opts) {
+        model ??= import('./script.ts').then(({ ScriptModel }) => ScriptModel.fromFile(script, transcript));
+        return model.then(m => m.startThread(opts));
+      },
+    };
   }
   const name = `codex:${config.name}${config.effort ? `@${config.effort}` : ''}`;
-  return lazy(name, async () => new (await import('./codex.ts')).CodexModel(config, options.codex));
-}
-
-function lazy(name: string, load: () => Promise<Model>): Model {
-  let model: Promise<Model> | undefined;
   return {
     name,
-    startThread(opts: { instructions: string; tools: ToolSpec[]; bounded?: boolean }): Promise<ModelThread> {
-      model ??= load();
-      return model.then((m) => m.startThread(opts));
-    },
+    startThread: async opts => (await import('./decisions.ts')).CodexDecisions.open(config, opts, options.codex),
   };
 }

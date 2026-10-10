@@ -26,7 +26,10 @@ outside disposable output; no adopt/issue-acceptance workflow. Every run has a
 static local HTML viewer; screenshot capture and video belong to the run.
 Details: `backlog/run-view/`. Actor-context is implemented with scoped live
 verification; its comparative endurance/cost gates remain open. The independent
-grader remains outstanding.
+grader is deferred: completion stays with the actor, avoiding the tuning cost
+experienced in the previous project. Async condition-based waits are implemented
+for slow/streaming responses without holding model calls open; see
+`backlog/async-waits/` for the contract and verification.
 
 ## How we know it works
 

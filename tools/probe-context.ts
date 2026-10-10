@@ -9,7 +9,7 @@ import { recordStory } from '../src/run/record.ts';
 import { Evidence } from '../src/run/evidence.ts';
 import { explore } from '../src/run/explore.ts';
 
-const { values } = parseArgs({ options: { out: { type: 'string' }, story: { type: 'string', default: 'busy-morning' }, minutes: { type: 'string', default: '10' }, long: { type: 'string' }, bugs: { type: 'string', default: '' }, explore: { type: 'boolean' } } });
+const { values } = parseArgs({ options: { out: { type: 'string' }, story: { type: 'string', default: 'busy-morning' }, long: { type: 'string' }, bugs: { type: 'string', default: '' }, explore: { type: 'boolean' } } });
 if (!values.out) throw new Error('Pass --out <scratch-directory>');
 const out = resolve(values.out);
 mkdirSync(out, { recursive: true });
@@ -33,11 +33,11 @@ try {
   if (values.explore) {
     project.dir = join(out, 'playtest');
     project.runsDir = join(project.dir, '.runs');
-    const result = await explore(project, { fresh: true, steps: 50, minutes: Number(values.minutes), goal: 'Sign in as admin@example.test with password admin-pass-1. Test creating and editing tasks in Northern Onboarding, verify saves after reloading, and investigate errors or inconsistent results. Report problems you observe.', progress: console.log });
+    const result = await explore(project, { fresh: true, steps: 50, goal: 'Sign in as admin@example.test with password admin-pass-1. Test creating and editing tasks in Northern Onboarding, verify saves after reloading, and investigate errors or inconsistent results. Report problems you observe.', progress: console.log });
     writeFileSync(join(out, 'result.json'), JSON.stringify(result, null, 2));
     console.log(JSON.stringify({ outcome: result.session.outcome, findings: result.findings.map(f => ({ title: f.title, reproduced: f.reproduced })), stats: result.session.stats, out }, null, 2));
   } else {
-    const result = await recordStory(project, story, { minutes: Number(values.minutes), runDir: out, evidence: new Evidence(out, false), progress: console.log });
+    const result = await recordStory(project, story, { runDir: out, evidence: new Evidence(out, false), progress: console.log });
     writeFileSync(join(out, 'result.json'), JSON.stringify(result, null, 2));
     if (count) {
       const db = new DatabaseSync(dbPath);

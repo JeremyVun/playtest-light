@@ -7,8 +7,8 @@ import { mergeExplained, priorStep, type Draft } from '../src/run/findings.ts';
 test('the seed rotates through the flavours, the first being the default plan', () => {
   assert.equal(flavourOf(0).name, 'main tasks first');
   assert.equal(flavourOf(FLAVOURS.length + 1), FLAVOURS[1]);
-  assert.equal(explorerInstructions({ steps: 60, minutes: 8 }), explorerInstructions({ steps: 60, minutes: 8 }, FLAVOURS[0].plan(1280)));
-  const phone = explorerInstructions({ steps: 60, minutes: 8 }, flavourOf(2).plan(1440));
+  assert.equal(explorerInstructions({ steps: 60 }), explorerInstructions({ steps: 60 }, FLAVOURS[0].plan(1280)));
+  const phone = explorerInstructions({ steps: 60 }, flavourOf(2).plan(1440));
   assert.match(phone, /^1\. Call tools\.set_width\(\{ width: 420 \}\) before anything else/m);
   assert.match(phone, /set_width\(\{ width: 1440 \}\) and visit what you have not seen yet/);
   for (const f of FLAVOURS) assert.doesNotMatch(f.plan(1280), /Feedback|Reports|Northern|sparkline|BUGS/);

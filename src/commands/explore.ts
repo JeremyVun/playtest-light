@@ -1,21 +1,19 @@
 import { positiveNumber, type CommandArgs } from '../cli.ts';
 import { projectFromArgs } from '../project.ts';
-import { DEFAULT_EXPLORE_MINUTES, DEFAULT_EXPLORE_STEPS, explore } from '../run/explore.ts';
+import { DEFAULT_EXPLORE_STEPS, explore } from '../run/explore.ts';
 import { openView } from './view.ts';
 import { exploreSummary } from '../run/findings.ts';
 
 export async function run(args: CommandArgs): Promise<number> {
   const project = projectFromArgs(args, args.positionals[0]);
   const steps = positiveNumber(args.values.steps, DEFAULT_EXPLORE_STEPS, 'steps', true);
-  const minutes = positiveNumber(args.values.minutes, DEFAULT_EXPLORE_MINUTES, 'minutes');
   const json = args.values.json === true;
   const goal = typeof args.values.goal === 'string' && args.values.goal.trim() ? args.values.goal.trim() : undefined;
-  if (!json) console.log(`exploring for up to ${steps} actions or ${minutes} minutes${goal ? `, focus: ${goal}` : ''}`);
+  if (!json) console.log(`exploring for up to ${steps} actions${goal ? `, focus: ${goal}` : ''}`);
   const r = await explore(project, {
     goal,
     video: args.values.video === true,
     steps,
-    minutes,
     progress: json ? undefined : (line) => console.log(line),
   });
   if (json) {

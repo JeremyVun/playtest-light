@@ -2,7 +2,7 @@
 // (stable prefix + append-only steps log + current page) with the prompt cache covering all but the
 // newest page? Simulates a session of synthetic decisions per strategy and transport.
 // Usage: node tools/spike-context.ts [--strategies revert,warm,fresh,fork,forklog,forktrail,accumulate]
-//   [--transports http,ws] [--effort medium] [--decisions 20] [--gap 0] [--server spawn|daemon]
+//   [--transports http,ws] [--effort medium] [--decisions 20] [--gap 0]
 //   [--codex-home dir] [--tier priority] [--hold 1000] [--json out.json] [--sizes] [--capture]
 // Strategies: revert: one persisted thread, each decision's turn cut at its call and reverted.
 //   warm: revert plus a throwaway turn after each decision that ends at the log.
@@ -12,9 +12,9 @@
 //   sections rather than after them. accumulate: v1's way, one turn whose act results carry the pages.
 // --gap: milliseconds between decisions, standing in for the browser running the batch.
 // --sizes: print the synthetic content's sizes (and write it to --json) without calling a model.
-// With --server spawn (the default) on the http transport, per-item cache attribution and the
+// On the http transport, per-item cache attribution and the
 // timing of each response's phases are read from the private app-server's trace log.
-// --codex-home: the CODEX_HOME of the app-server (spawned, or the daemon whose socket is there).
+// --codex-home: the CODEX_HOME of the app-server (spawned).
 // --tier: the Responses service tier ("priority" is Codex's Fast mode).
 // --hold: how long a fork's call is held before the turn is cut, so its usage arrives first.
 // --capture: send the requests to a local stand-in provider instead and print what Codex puts in
@@ -24,11 +24,9 @@ import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { createServer, type IncomingHttpHeaders } from 'node:http';
-import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { threadStartParams } from '../src/model/codex.ts';
 import { RpcClient, type Transport } from '../src/model/rpc.ts';
-import { connectDaemon, controlSocketPath } from '../src/model/transport.ts';
 import { actTool, doneTool, giveUpTool } from '../src/run/actor.ts';
 import type { ToolSpec } from '../src/types.ts';
 
@@ -40,7 +38,6 @@ const { values } = parseArgs({
     transports: { type: 'string', default: 'http,ws' },
     decisions: { type: 'string', default: '20' },
     gap: { type: 'string', default: '0' },
-    server: { type: 'string', default: 'spawn' },
     'codex-home': { type: 'string' },
     tier: { type: 'string' },
     hold: { type: 'string', default: '1000' },
@@ -324,13 +321,12 @@ type Server = {
 
 const TRACE = 'codex_api::sse::responses=trace,codex_core::client=info';
 
-async function openServer(kind: string, trace: boolean): Promise<Server> {
+async function openServer(trace: boolean): Promise<Server> {
   const attribution = new Map<string, Attribution>();
   const marks: Mark[] = [];
   const begin = now();
   let transport: Transport;
-  if (kind === 'daemon') transport = await connectDaemon(CODEX_HOME ? join(CODEX_HOME, 'app-server-control', 'app-server-control.sock') : controlSocketPath());
-  else {
+  {
     const env = { ...process.env, ...(CODEX_HOME ? { CODEX_HOME } : {}), ...(trace ? { RUST_LOG: TRACE } : {}) };
     const child = spawn('codex', ['app-server', '--listen', 'stdio://'], { stdio: ['pipe', 'pipe', 'pipe'], env });
     let toClient: (message: string) => void = () => {};
@@ -365,9 +361,6 @@ async function openServer(kind: string, trace: boolean): Promise<Server> {
     };
   }
   const rpc = new RpcClient(transport);
-  // The daemon's socket is unreferenced while no request is pending, which would let the process
-  // exit in the middle of a turn.
-  rpc.hold();
   const listeners = new Map<string, Set<(method: string, params: any) => void>>();
   const tools = new Map<string, (params: any) => Promise<object>>();
   rpc.onNotification((method, params) => {
@@ -985,7 +978,7 @@ if (values.startup) {
   const rows: number[][] = [];
   for (let i = 0; i < Number(values.startup); i++) {
     const begin = now();
-    const server = await openServer(values.server!, values.server === 'spawn');
+    const server = await openServer(true);
     const opened = now() - begin;
     const message = decisionMessage(1, 'QUOKKA-0000');
     const threadId = (await server.rpc.request('thread/start', startParams(server, 'http', randomBytes(4).toString('hex'), true, false, message.stable))).thread.id;
@@ -1005,8 +998,8 @@ const strategies = values.strategies!.split(',') as Strategy[];
 const transports = values.transports!.split(',') as TransportName[];
 const results: { strategy: string; transport: string; summary: Summary; decisions: Decision[] }[] = [];
 for (const transport of transports) {
-  const server = await openServer(values.server!, values.server === 'spawn' && transport === 'http');
-  console.log(`server ${values.server} (${CODEX_HOME ?? 'default home'}): initialize ${Math.round(server.startup.initializeMs)} ms, config/read ${Math.round(server.startup.configMs)} ms, MCP servers: ${server.mcp.join(', ') || 'none'}`);
+  const server = await openServer(transport === 'http');
+  console.log(`server spawn (${CODEX_HOME ?? 'default home'}): initialize ${Math.round(server.startup.initializeMs)} ms, config/read ${Math.round(server.startup.configMs)} ms, MCP servers: ${server.mcp.join(', ') || 'none'}`);
   for (const strategy of strategies) {
     try {
       const decisions = await runSession(server, strategy, transport);
@@ -1032,7 +1025,7 @@ if (capture) {
   capture.close();
   process.exit(0);
 }
-console.log(`\nSummary (${MODEL} @ ${EFFORT}${values.tier ? `, tier ${values.tier}` : ''}, ${DECISIONS} decisions, gap ${GAP} ms, hold ${HOLD} ms, server ${values.server}, ${CODEX_HOME ?? 'default home'}):`);
+console.log(`\nSummary (${MODEL} @ ${EFFORT}${values.tier ? `, tier ${values.tier}` : ''}, ${DECISIONS} decisions, gap ${GAP} ms, hold ${HOLD} ms, server spawn, ${CODEX_HOME ?? 'default home'}):`);
 console.log(table(results.map((r) => r.summary)));
-if (values.json) writeFileSync(values.json, JSON.stringify({ model: MODEL, effort: EFFORT, tier: values.tier, gap: GAP, hold: HOLD, server: values.server, codexHome: CODEX_HOME, results }, null, 2));
+if (values.json) writeFileSync(values.json, JSON.stringify({ model: MODEL, effort: EFFORT, tier: values.tier, gap: GAP, hold: HOLD, server: 'spawn', codexHome: CODEX_HOME, results }, null, 2));
 process.exit(0);

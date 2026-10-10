@@ -1,7 +1,6 @@
 export type DiffLine = { op: ' ' | '-' | '+'; line: string; a: number; b: number };
 
-// Longest-common-subsequence diff after trimming the common head and tail; snapshots are
-// a few hundred lines, so the quadratic table stays small.
+// Large changes use a coarse diff to keep the comparison matrix below 4 MB.
 export function diffLines(a: string[], b: string[]): DiffLine[] {
   let head = 0;
   while (head < a.length && head < b.length && a[head] === b[head]) head++;
@@ -10,8 +9,9 @@ export function diffLines(a: string[], b: string[]): DiffLine[] {
   const n = a.length - head - tail;
   const m = b.length - head - tail;
   const width = m + 1;
-  const lcs = new Uint32Array((n + 1) * width);
-  for (let i = n - 1; i >= 0; i--) {
+  const coarse = (n + 1) * width > 1_000_000;
+  const lcs = new Uint32Array(coarse ? 0 : (n + 1) * width);
+  for (let i = coarse ? -1 : n - 1; i >= 0; i--) {
     for (let j = m - 1; j >= 0; j--) {
       lcs[i * width + j] = a[head + i] === b[head + j] ? lcs[(i + 1) * width + j + 1] + 1 : Math.max(lcs[(i + 1) * width + j], lcs[i * width + j + 1]);
     }
@@ -25,7 +25,7 @@ export function diffLines(a: string[], b: string[]): DiffLine[] {
       out.push({ op: ' ', line: a[head + i], a: head + i, b: head + j });
       i++;
       j++;
-    } else if (i < n && (j === m || lcs[(i + 1) * width + j] >= lcs[i * width + j + 1])) {
+    } else if (i < n && (coarse || j === m || lcs[(i + 1) * width + j] >= lcs[i * width + j + 1])) {
       out.push({ op: '-', line: a[head + i], a: head + i, b: head + j });
       i++;
     } else {

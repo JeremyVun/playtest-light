@@ -7,7 +7,7 @@ import { captureResize } from './evidence.ts';
 import { parseCheck } from './actor.ts';
 import { unifiedDiff } from './diff.ts';
 import type { Attempt, ExploreSession, ExploreStep, FindingCheck, FindingKind, Report, Severity } from './explore.ts';
-import { describeAction, describeCheck, describeIssue, seconds } from './format.ts';
+import { pagePath, describeAction, describeCheck, describeIssue, seconds } from './format.ts';
 import { openStory, type Run } from './session.ts';
 
 export const SLOW_NOTE_MS = 1000;
@@ -114,15 +114,6 @@ export function describeStep(s: ExploreStep): string {
   return s.type === 'resize' ? `resize the window to ${s.width}px wide` : describeAction(s);
 }
 
-function pathOf(url: string): string {
-  try {
-    const u = new URL(url);
-    return u.pathname + u.search;
-  } catch {
-    return url;
-  }
-}
-
 export const bare = (url: string) => url.split('?')[0];
 
 // Evaluate claims at their cited step, even when the actor continued afterwards.
@@ -144,8 +135,8 @@ async function replaySession(run: Run, session: ExploreSession): Promise<Replaye
       for (const r of dueBefore.get(n) ?? []) before.set(r, (await evaluateFindingChecks(page, r.checks)).ok);
       for (const r of due.get(n) ?? []) checks.set(r, await evaluateFindingChecks(page, r.checks));
     };
-    const first = await page.snapshot();
-    const out: Replayed = { ms: 0, start: { url: pathOf(first.url), lines: first.lines, issues: opened.issues }, steps: [], checks, before };
+    const first = opened.snapshot ?? await page.snapshot();
+    const out: Replayed = { ms: 0, start: { url: pagePath(first.url), lines: first.lines, issues: opened.issues }, steps: [], checks, before };
     await evaluate(0);
     for (const [i, step] of session.steps.entries()) {
       const result = await runStep(page, step, session);
@@ -153,8 +144,8 @@ async function replaySession(run: Run, session: ExploreSession): Promise<Replaye
         out.stopped = { step: i + 1, error: result.error ?? 'failed' };
         break;
       }
-      const snap = await page.snapshot();
-      out.steps.push({ url: pathOf(snap.url), lines: snap.lines, settleMs: result.settleMs, issues: result.issues });
+      const snap = result.snapshot ?? await page.snapshot();
+      out.steps.push({ url: pagePath(snap.url), lines: snap.lines, settleMs: result.settleMs, issues: result.issues });
       await evaluate(i + 1);
     }
     out.ms = Math.round(performance.now() - started);
@@ -597,8 +588,6 @@ function outcomeText(session: ExploreSession): string {
       return 'the model called done';
     case 'steps':
       return 'the action budget was spent';
-    case 'minutes':
-      return 'the time budget was spent';
     case 'unfinished':
       return 'the model stopped without calling done';
   }
@@ -647,7 +636,8 @@ export function findingsMarkdown(session: ExploreSession, built: Built): string 
   const s = session.stats;
   const out = [`# pt explore: ${reproducedText(reproduced)}, ${unreproduced.length} unreproduced`, ''];
   out.push(`App ${session.app} (${session.seedCommand ? 'seeded before each replay' : 'no seed; existing data'}). Model ${session.model}${s.responses !== undefined ? `, ${plural(s.responses, 'response')}` : ''}, ${plural(s.turns, 'turn')}. ${seconds(s.ms)} in all, ${seconds(s.modelMs)} with the model.`);
-  out.push(`${plural(s.actions, 'step')}${s.failedActions ? ` and ${plural(s.failedActions, 'failed action')}` : ''} of a ${session.budget.steps}-action, ${session.budget.minutes}-minute budget; ended because ${outcomeText(session)}.`);
+  if (s.waitMs) out.push(`Waiting for the app: ${seconds(s.waitMs)}.`);
+  out.push(`${plural(s.actions, 'step')}${s.failedActions ? ` and ${plural(s.failedActions, 'failed action')}` : ''} of a ${session.budget.steps}-action budget; ended because ${outcomeText(session)}.`);
   if (session.goal) out.push(`Goal: ${session.goal}`);
   out.push(`Random seed ${session.seed}: ${session.flavour}${session.earlier.length ? `, told what ${lastSessions(session.earlier.length)} with these settings found` : ''}.`);
   if (session.summary) out.push('', `The model's summary: ${session.summary}`);

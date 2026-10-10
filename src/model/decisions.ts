@@ -1,8 +1,7 @@
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import type { Config, DecisionInput, DecisionResult, ModelThread, ModelUsage, ToolHandler, ToolSpec } from '../types.ts';
 import { connectCodex, explainTurnError, threadStartParams, type CodexConnection, type CodexOptions } from './codex.ts';
-import { spawnAppServer } from './transport.ts';
+
+import { RpcError } from './rpc.ts';
 
 const HTTP = { name: 'OpenAI', wire_api: 'responses', requires_openai_auth: true, supports_websockets: false };
 const deferred = <T>() => Promise.withResolvers<T>();
@@ -34,23 +33,16 @@ export class CodexDecisions implements ModelThread {
       if (method === 'item/permissions/requestApproval') return { permissions: {}, scope: 'turn' };
       if (method === 'item/tool/requestUserInput') return { answers: {} };
       if (method === 'currentTime/read') return { currentTimeAt: Math.floor(Date.now() / 1000) };
-      return { decision: 'decline' };
+      if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') return { decision: 'decline' };
+      if (method === 'execCommandApproval' || method === 'applyPatchApproval') return { decision: { denied: {} } };
+      if (method === 'mcpServer/elicitation/request') return { action: 'decline', content: null, _meta: null };
+      throw new RpcError(method, { code: -32601, message: 'Unsupported server request' });
     });
   }
 
   static async open(config: Config['model'], opts: { instructions: string; tools: ToolSpec[] }, options: CodexOptions = {}): Promise<CodexDecisions> {
-    const home = join(homedir(), '.playtest-lite', 'codex');
-    try {
-      const connection = await connectCodex(config.name, { ...options, connect: options.connect ?? (async () => spawnAppServer(options.codexCommand, home)) });
-      return new CodexDecisions(connection, config, opts);
-    } catch (error) {
-      if (/signed in|sign-in|login|unauthorized/i.test((error as Error).message))
-        throw new Error(`Playtest is not signed in; run CODEX_HOME=${home} codex login`);
-      throw error;
-    }
+    return new CodexDecisions(await connectCodex(options), config, opts);
   }
-
-  send(): Promise<{ text: string }> { return Promise.reject(new Error('Use decide for a bounded actor session')); }
 
   async decide(input: DecisionInput, onTool: ToolHandler): Promise<DecisionResult> {
     if (this.closed) throw new Error('actor session is closed');

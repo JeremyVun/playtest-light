@@ -14,6 +14,7 @@ rulings and design in `docs/backlog/v1/design.md`, phases and their status in
 - Milestones: `docs/roadmap.md`.
 - URL/seed design, verification and Jeremy's brief: `docs/backlog/url-targets/`.
 - Run/view simplification and automatic findings: `docs/backlog/run-view/`.
+- Async UI waits, twenty-minute chat responses and the owner's nonblocking requirement: `docs/backlog/async-waits/`. No overall actor time limit or `--minutes` flag; users stop runs with Ctrl+C.
 - The app the harness is tested against, with seeded users, planted bugs
   (`BUGS=`) and intended changes (`VARIANT=`): `fixtures/sample-app/`, see its
   `README.md`. `TEST_MODE=1 npm start` serves it on port 5310.

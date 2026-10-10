@@ -33,6 +33,8 @@ export function orderAction(a: RecordedAction): RecordedAction {
       return { type: a.type, url: a.url };
     case 'back':
       return { type: a.type };
+    case 'wait':
+      return { type: a.type, until: a.until.map(orderCheck), timeoutMs: a.timeoutMs };
     case 'scroll':
       return { type: a.type, ...target, direction: a.direction } as RecordedAction;
     default:

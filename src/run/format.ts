@@ -23,6 +23,8 @@ export function describeAction(a: Action | RecordedAction): string {
       return `navigate ${a.url}`;
     case 'back':
       return 'back';
+    case 'wait':
+      return `wait for ${a.until.map(describeCheck).join(' and ')} (up to ${seconds(a.timeoutMs)})`;
     case 'scroll':
       return `scroll ${a.direction}${on ? ` in ${on}` : ''}`;
     default:
@@ -42,6 +44,9 @@ export function describeCheck(c: Check): string {
       return `element ${describeLocator(c.locator)}`;
     case 'absent':
       return `absent ${describeLocator(c.locator)}`;
+    case 'enabled':
+    case 'disabled':
+      return `${describeLocator(c.locator)} ${c.type}`;
   }
 }
 
@@ -51,4 +56,13 @@ export function describeIssue(i: Issue): string {
 
 export function seconds(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+export function pagePath(url: string): string {
+  try {
+    const u = new URL(url);
+    return u.pathname + u.search;
+  } catch {
+    return url;
+  }
 }

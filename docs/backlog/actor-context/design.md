@@ -345,7 +345,7 @@ Keep the ordinary CLI output small; detailed metrics live in JSON/Debug.
    and every trial retrieves the required old fact correctly. Compare to the
    accumulating baseline; publish all failures and budget exhaustions. A baseline
    timeout counts, not a discarded sample. These are release gates, not promises.
-   For an open-ended explore run, reaching its declared action/time budget is
+   For an open-ended explore run, reaching its declared action budget is
    expected; score scenario coverage and the required delayed checks, not whether
    the actor called `done`. Budget exhaustion must not masquerade as story pass.
 5. **Cache gate:** within an epoch, captured reusable-prefix bytes must remain

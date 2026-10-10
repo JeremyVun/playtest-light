@@ -11,7 +11,6 @@ import { findProject, parseStory } from '../src/project.ts';
 import { explore, type ExploreResult } from '../src/run/explore.ts';
 import type { Project } from '../src/types.ts';
 
-const APP_DIR = join(import.meta.dirname, '..', 'fixtures', 'sample-app');
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'playtest-explore-')));
 let project: Project;
 
@@ -41,7 +40,7 @@ const addTask = [
 ];
 
 let scripts = 0;
-async function session(turns: ScriptTurn[], opts: { env?: Record<string, string>; steps?: number; minutes?: number; seed?: number; fresh?: boolean } = {}): Promise<{ result: ExploreResult; tools: Extract<TranscriptEntry, { event: 'tool' }>[]; sends: string[] }> {
+async function session(turns: ScriptTurn[], opts: { env?: Record<string, string>; steps?: number; seed?: number; fresh?: boolean } = {}): Promise<{ result: ExploreResult; tools: Extract<TranscriptEntry, { event: 'tool' }>[]; sends: string[] }> {
   const n = ++scripts;
   const file = join(scratch, `script-${n}.json`);
   const transcript = join(scratch, `transcript-${n}.jsonl`);
@@ -108,7 +107,7 @@ test('a session yields mechanical and model findings, reproduced by a replay wit
   assert.match(sends[0], /admin@example\.test/);
   assert.doesNotMatch(sends[0], /save-500|console-error|BUGS/);
   assert.match(tools[0].output, /^steps 1-3 done/m);
-  assert.match(tools[0].output, /^left: 57 actions, /m);
+  assert.match(tools[0].output, /^left: 57 actions$/m);
   assert.match(tools[1].output, /FAIL click button "Does not exist"/);
   assert.match(tools[2].output, /^finding 1 recorded at step 7/);
   assert.match(tools[3].output, /^report refused: text "Nothing like this" is false/);
@@ -283,15 +282,6 @@ test('the action budget stops the session and cuts a batch short', { timeout: 12
   assert.match(tools[1].output, /^Nothing ran: the budget is spent \(all 4 actions are used\)/);
   assert.equal(result.session.steps.length, 4);
   assert.equal(result.session.outcome, 'steps');
-});
-
-test('the time budget stops the session', { timeout: 120_000 }, async () => {
-  const back = { tool: 'act', args: { actions: [{ type: 'back' }, { type: 'navigate', url: '/projects' }] } };
-  const { result, tools, sends } = await session([[{ tool: 'act', args: { actions: signIn } }, back, back, back, back, back, { text: 'Out of time.' }]], { minutes: 0.003 });
-  assert.ok(tools.some((t) => /^Nothing ran: the budget is spent \(the 0.003 minutes are up\)/.test(t.output)));
-  assert.ok(result.session.steps.length < 13);
-  assert.equal(result.session.outcome, 'minutes');
-  assert.ok(sends.length > 1);
 });
 
 test('every finding is saved automatically and survives run pruning', () => {

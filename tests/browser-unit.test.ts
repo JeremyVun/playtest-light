@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { deflateSync } from 'node:zlib';
 import { decodePngGrey, fingerprintDistance, fingerprintOf, fingerprintsMatch } from '../src/browser/fingerprint.ts';
 import { keyEvents } from '../src/browser/keys.ts';
-import { buildEntries, findEntry, locatorFor, normalizedLines, type AXNode } from '../src/browser/snapshot.ts';
+import { buildEntries, findEntry, indexLocators, normalizedLines, type AXNode } from '../src/browser/snapshot.ts';
 
 let nextId = 1;
 const made: AXNode[] = [];
@@ -67,10 +67,10 @@ test('snapshot: prunes, nests, merges text runs and drops text that repeats a na
 test('locators: nth only when the role and name repeat', () => {
   const root = n('RootWebArea', '', [n('button', 'Go'), n('button', 'Go'), n('button', 'Stop'), n('link', 'Go')]);
   const entries = buildEntries(tree(root));
-  assert.deepEqual(locatorFor(entries, 0), { role: 'button', name: 'Go', nth: 0 });
-  assert.deepEqual(locatorFor(entries, 1), { role: 'button', name: 'Go', nth: 1 });
-  assert.deepEqual(locatorFor(entries, 2), { role: 'button', name: 'Stop' });
-  assert.deepEqual(locatorFor(entries, 3), { role: 'link', name: 'Go' });
+  assert.deepEqual(indexLocators(entries)[0], { role: 'button', name: 'Go', nth: 0 });
+  assert.deepEqual(indexLocators(entries)[1], { role: 'button', name: 'Go', nth: 1 });
+  assert.deepEqual(indexLocators(entries)[2], { role: 'button', name: 'Stop' });
+  assert.deepEqual(indexLocators(entries)[3], { role: 'link', name: 'Go' });
   assert.equal(findEntry(entries, { role: 'button', name: ' Go ', nth: 1 }), entries[1]);
   assert.equal(findEntry(entries, { role: 'button', name: 'Go', nth: 2 }), undefined);
 });
@@ -136,7 +136,7 @@ test('png: decodes every filter type to luminance', () => {
 });
 
 test('fingerprint: stable hex, zero distance to itself, larger for bigger changes', () => {
-  const base = (x: number, y: number): [number, number, number] => (x < 40 ? [255, 255, 255] : [20, 20, 20]);
+  const base = (x: number, _y: number): [number, number, number] => (x < 40 ? [255, 255, 255] : [20, 20, 20]);
   const a = fingerprintOf(png(80, 50, base, () => 4));
   assert.match(a, /^[0-9a-f]{80}$/);
   assert.equal(fingerprintOf(png(80, 50, base, () => 0)), a);

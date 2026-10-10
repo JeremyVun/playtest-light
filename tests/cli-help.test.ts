@@ -50,6 +50,7 @@ test('invalid command options fail before loading a project, as text or JSON', (
     ['view', '--seed', 'echo wrong'], ['view', '--record'],
     ['init', '--no-seed'], ['explore', '--random-seed', '1'],
     ['explore', '--fresh'], ['run', '--steps', '10'],
+    ['run', '--minutes', '30'], ['explore', '--minutes', '30'],
     ['run', '--url'], ['help', 'run', 'extra'], ['help', 'wat'],
     ['wat'], ['toString'], ['accept'], ['view', 'one', 'two'],
   ]) {

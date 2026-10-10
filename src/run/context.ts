@@ -1,7 +1,7 @@
 import { appendFileSync, closeSync, openSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import type { DecisionInput, DecisionResult, ModelThread, Page, Snapshot, ToolHandler, ToolSpec } from '../types.ts';
+import type { DecisionInput, DecisionResult, Snapshot, ToolHandler, ToolSpec } from '../types.ts';
 import type { TrajectoryEvent } from './actor.ts';
 import { describeAction } from './format.ts';
 
@@ -113,15 +113,6 @@ export class ActorContext {
     }
   };
 
-  private read(index: Index): any {
-    const fd = openSync(this.trajectory, 'r');
-    try {
-      const buf = Buffer.alloc(index.length);
-      if (readSync(fd, buf, 0, buf.length, index.offset) !== buf.length) throw new Error('Evidence is incomplete');
-      return JSON.parse(buf.toString());
-    } finally { closeSync(fd); }
-  }
-
   private rollover(count = true): void {
     if (count) this.stats.rollovers++;
     const allTasks = [...this.tasks.values()];
@@ -193,67 +184,75 @@ export class ActorContext {
     if (args.query !== undefined && (typeof args.query !== 'string' || size(args.query) > 512)) throw new Error('Inspection query must be text of at most 512 bytes');
     if (args.cursor !== undefined && (typeof args.cursor !== 'string' || size(args.cursor) > 2048)) throw new Error('Invalid inspection cursor');
     if (args.id !== undefined && (!Number.isInteger(args.id) || args.id < 1)) throw new Error('Inspection id must be a positive event number');
-    let cursor = { mode: args.mode, query: String(args.query ?? ''), id: args.id, end: this.index.length, offset: 0, page: this.lastPageHash };
+    let cursor = { mode: args.mode, query: String(args.query ?? ''), id: args.id, end: this.index.length, position: 0, offset: 0, separator: false, page: this.lastPageHash };
     if (args.cursor) {
       try { cursor = JSON.parse(Buffer.from(args.cursor, 'base64url').toString()); } catch { throw new Error('Invalid inspection cursor'); }
-      if (cursor.mode !== args.mode || typeof cursor.query !== 'string' || size(cursor.query) > 512 || !Number.isInteger(cursor.offset) || cursor.offset < 0 || !Number.isInteger(cursor.end) || cursor.end < 0 || cursor.end > this.index.length) throw new Error('Invalid inspection cursor');
+      if (!cursor || cursor.mode !== args.mode || typeof cursor.query !== 'string' || size(cursor.query) > 512 || !Number.isInteger(cursor.position) || cursor.position < 0 || !Number.isInteger(cursor.offset) || cursor.offset < 0 || typeof cursor.separator !== 'boolean' || !Number.isInteger(cursor.end) || cursor.end < 0 || cursor.end > this.index.length || (cursor.id !== undefined && (!Number.isInteger(cursor.id) || cursor.id < 1))) throw new Error('Invalid inspection cursor');
       if (args.mode === 'page' && cursor.page !== this.lastPageHash) throw new Error('Page changed; inspect again without the old cursor');
     }
-    const match = (text: string) => text.toLowerCase().includes(String(cursor.query).toLowerCase());
+    const query = cursor.query.toLowerCase();
+    const match = (text: string) => text.toLowerCase().includes(query);
+    let fd: number | undefined;
+    const read = (entry: Index): any => {
+      fd ??= openSync(this.trajectory, 'r');
+      const buf = Buffer.alloc(entry.length);
+      if (readSync(fd, buf, 0, buf.length, entry.offset) !== buf.length) throw new Error('Evidence is incomplete');
+      return JSON.parse(buf.toString());
+    };
     const self = this;
-    function* rows(): Generator<string> {
-      if (args.mode === 'page') {
-        for (const line of (self.latest?.rawText ?? self.latest?.text ?? '').split('\n')) if (match(line)) yield line;
-      } else if (args.mode === 'memory') {
-        const tasks = new Map(self.initialTasks.map(t => [t.id, t]));
-        const facts = new Map<string, Fact>();
-        for (const entry of self.index) {
-          if (entry.id > cursor.end) break;
-          if (entry.event !== 'memory') continue;
-          const event = self.read(entry);
-          for (const t of event.tasks) tasks.set(t.id, t);
-          for (const f of event.facts) { facts.delete(f.id); facts.set(f.id, f); }
-        }
-        for (const value of [...tasks.values(), ...facts.values()]) {
-          const line = quoted(value);
-          if (match(line)) yield line;
-        }
-      } else {
-        for (const entry of self.index) {
-          if (entry.id > cursor.end) break;
-          if (cursor.id !== undefined && entry.id !== cursor.id) continue;
-          const historical = self.read(entry);
+    function* rows(): Generator<{ position: number; text: string }> {
+      if (args.mode === 'history') {
+        const end = cursor.id === undefined ? cursor.end : Math.min(cursor.id, cursor.end);
+        for (let position = Math.max(cursor.position, (cursor.id ?? 1) - 1); position < end; position++) {
+          const entry = self.index[position];
+          const historical = read(entry);
           for (const field of ['text', 'result']) if (typeof historical[field] === 'string')
             historical[field] = historical[field].replace(/^(\s*)\[e\d+\] /gm, '$1[historical control] ');
-          const line = JSON.stringify(historical);
-          if (match(line)) {
-            if (cursor.query && cursor.id === undefined) {
-              const at = line.toLowerCase().indexOf(cursor.query.toLowerCase());
-              yield quoted({ id: entry.id, step: entry.step, url: entry.url, excerpt: line.slice(Math.max(0, at - 150), at + cursor.query.length + 350), read: 'inspect history with this id for the full event' });
-            } else yield line;
-          }
+          const text = JSON.stringify(historical);
+          if (!match(text)) continue;
+          if (cursor.query && cursor.id === undefined) {
+            const at = text.toLowerCase().indexOf(query);
+            yield { position, text: quoted({ id: entry.id, step: entry.step, url: entry.url, excerpt: text.slice(Math.max(0, at - 150), at + cursor.query.length + 350), read: 'inspect history with this id for the full event' }) };
+          } else yield { position, text };
         }
+      } else {
+        let values: string[];
+        if (args.mode === 'page') values = (self.latest?.rawText ?? self.latest?.text ?? '').split('\n');
+        else {
+          const tasks = new Map(self.initialTasks.map(t => [t.id, t]));
+          const facts = new Map<string, Fact>();
+          for (const entry of self.index) {
+            if (entry.id > cursor.end) break;
+            if (entry.event !== 'memory') continue;
+            const event = read(entry);
+            for (const t of event.tasks) tasks.set(t.id, t);
+            for (const f of event.facts) { facts.delete(f.id); facts.set(f.id, f); }
+          }
+          values = [...tasks.values(), ...facts.values()].map(quoted);
+        }
+        for (let position = cursor.position; position < values.length; position++)
+          if (match(values[position])) yield { position, text: values[position] };
       }
     }
-    let matches = 0, total = 0, copied = 0, windowClosed = false;
     const chunks: Buffer[] = [];
-    const allowance = this.limits.evidence - 1000;
-    for (const row of rows()) {
-      const bytes = Buffer.from((matches ? '\n' : '') + row);
-      matches++;
-      if (!windowClosed && total + bytes.length > cursor.offset && copied < allowance) {
-        const start = Math.max(0, cursor.offset - total);
-        let end = Math.min(bytes.length, start + allowance - copied);
-        while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
-        const part = bytes.subarray(start, end);
-        chunks.push(part); copied += part.length;
-        if (end < bytes.length) windowClosed = true;
+    let remaining = this.limits.evidence - 1000, next: string | undefined;
+    try {
+      for (const row of rows()) {
+        const bytes = Buffer.from((cursor.separator ? '\n' : '') + row.text);
+        const start = cursor.offset;
+        if (start > bytes.length || (bytes[start] & 0xc0) === 0x80) throw new Error('Invalid inspection cursor');
+        let end = Math.min(bytes.length, start + remaining);
+        while (end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
+        chunks.push(bytes.subarray(start, end));
+        remaining -= end - start;
+        if (end < bytes.length) {
+          next = Buffer.from(JSON.stringify({ ...cursor, position: row.position, offset: end })).toString('base64url');
+          break;
+        }
+        cursor.position = row.position + 1; cursor.offset = 0; cursor.separator = true;
       }
-      total += bytes.length;
-    }
-    if (cursor.offset > total) throw new Error('Inspection cursor is outside its result');
-    const next = cursor.offset + copied < total ? Buffer.from(JSON.stringify({ ...cursor, offset: cursor.offset + copied })).toString('base64url') : undefined;
-    return `Matches: ${matches}; source: ${args.mode}${next ? `; continue with cursor ${next}` : '; end'}\n${Buffer.concat(chunks).toString() || '(no matches)'}`;
+    } finally { if (fd !== undefined) closeSync(fd); }
+    return `Source: ${args.mode}${next ? `; continue with cursor ${next}` : '; end'}\n${Buffer.concat(chunks).toString() || '(no matches)'}`;
   }
 
   async handle(name: string, args: unknown, run: ToolHandler): Promise<string> {
@@ -323,12 +322,4 @@ export class ActorContext {
     this.log({ event: 'decision', ...r, ...(error ? { error } : {}) });
     if (!r.tool && !error) this.log({ event: 'result', error: 'You ended without calling a tool. Continue with exactly one available tool call; use done when finished.' });
   }
-}
-
-export async function decideWithin(thread: ModelThread, input: DecisionInput, handler: ToolHandler, ms: number): Promise<DecisionResult> {
-  if (!thread.decide) throw new Error('Model does not support bounded decisions');
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([thread.decide(input, handler), new Promise<never>((_, reject) => { timer = setTimeout(() => { void thread.close(); reject(new Error('Actor decision deadline exceeded')); }, Math.max(0, ms)); })]);
-  } finally { clearTimeout(timer); }
 }

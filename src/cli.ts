@@ -36,7 +36,6 @@ const commands: Record<string, Command> = {
       record: { description: 'Record again, even if a baseline already exists.' },
       accept: { description: 'Save verified baselines recorded by this run.' },
       ...media,
-      minutes: { value: 'n', description: 'Recording time limit per story (default: 10).' },
     },
     examples: ['pt run --url http://localhost:3000', 'pt run checkout --view', 'pt run checkout --record --accept'],
   },
@@ -46,7 +45,6 @@ const commands: Record<string, Command> = {
     options: {
       goal: { value: 'text', description: 'Focus on a task or part of the app.' },
       steps: { value: 'n', description: 'Maximum browser actions (default: 60).' },
-      minutes: { value: 'n', description: 'Exploration time limit (default: 8).' },
       ...target,
       view: { description: 'Open the HTML report when finished.' },
       video: media.video,

@@ -1,12 +1,12 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { positiveNumber, type CommandArgs } from '../cli.ts';
+import type { CommandArgs } from '../cli.ts';
 import { newRunDir, releaseRun } from '../env/runs.ts';
 import { baselinePath, displayPath, listStories, loadStory, projectFromArgs } from '../project.ts';
 import { acceptStory, readBaseline, type Accepted } from '../run/baseline.ts';
 import type { ViewStory } from '../run/view-html.ts';
 import { Evidence } from '../run/evidence.ts';
-import { recordStory, recordMarkdown, DEFAULT_RECORD_MINUTES, type RecordResult } from '../run/record.ts';
+import { recordStory, recordMarkdown, type RecordResult } from '../run/record.ts';
 import { checkStory, type StoryResult } from '../run/replay.ts';
 import { checkMarkdown, checkSummary, shellQuote } from '../run/report.ts';
 import { openRun, type Run } from '../run/session.ts';
@@ -17,7 +17,6 @@ export async function run(args: CommandArgs): Promise<number> {
   const stories = args.positionals.length ? args.positionals.map((name) => loadStory(project, name)) : listStories(project);
   if (!stories.length) throw new Error(`No stories in ${displayPath(project.dir)}/stories. Write a Markdown story first.`);
   if (!project.config.url) throw new Error('No target URL; pass --url <url> or set url in playtest/config.json.');
-  const minutes = positiveNumber(args.values.minutes, DEFAULT_RECORD_MINUTES, 'minutes');
   const json = args.values.json === true;
   const record = args.values.record === true;
   const started = performance.now();
@@ -51,7 +50,7 @@ export async function run(args: CommandArgs): Promise<number> {
             evidence.screenshots = true;
             let r: RecordResult;
             try {
-              r = await recordStory(project, story, { minutes, runDir: join(runDir, `record-${i + 1}`), evidence, progress: json ? undefined : (line) => console.log(line) });
+              r = await recordStory(project, story, { runDir: join(runDir, `record-${i + 1}`), evidence, progress: json ? undefined : (line) => console.log(line) });
             } finally { evidence.screenshots = screenshots; }
             const accepted = r.deterministic && args.values.accept ? acceptStory(project, story, r.baseline) : undefined;
             recordings.push({ ...r, accepted });

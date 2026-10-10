@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -178,4 +180,29 @@ test('failed decisions retain reported usage and distinguish unavailable account
   assert.equal(ctx.stats.unknownUsage, 1);
   const events = readFileSync(join(dir, 'trajectory.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(events.map(e => e.error), ['interrupt failed', 'deadline exceeded']);
+});
+
+test('history pages resume at their saved file position with one open per page', async t => {
+  const ctx = new ActorContext(fixture(t), 'Read a long run');
+  for (let i = 0; i < 10000; i++) ctx.log({ event: 'observation', url: '/', text: `row ${i} ` + 'x'.repeat(500) });
+  const originalOpen = fs.openSync, originalRead = fs.readSync;
+  let opens = 0;
+  const positions: number[] = [];
+  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => { opens++; return originalOpen(...args); }) as typeof fs.openSync;
+  fs.readSync = ((...args: any[]) => { positions.push(args[4]); return (originalRead as any)(...args); }) as typeof fs.readSync;
+  syncBuiltinESMExports();
+  try {
+    let cursor: string | undefined;
+    let previous = -1;
+    for (let i = 0; i < 4; i++) {
+      opens = 0; positions.length = 0;
+      const result = await ctx.handle('inspect', { mode: 'history', cursor }, noAction);
+      assert.equal(opens, 1);
+      assert.ok(positions.length < 25, `read ${positions.length} rows to fill one page`);
+      assert.ok(positions[0] > previous, 'must not rescan earlier rows');
+      previous = positions[0];
+      cursor = /continue with cursor (\S+)/.exec(result)?.[1];
+      assert.ok(cursor);
+    }
+  } finally { fs.openSync = originalOpen; fs.readSync = originalRead; syncBuiltinESMExports(); }
 });

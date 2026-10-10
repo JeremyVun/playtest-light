@@ -119,7 +119,7 @@ test('scripted decisions also settle local work before closing', async () => {
   const actor = await new ScriptModel([[{ tool: 'act' }]]).startThread(options);
   const finish = Promise.withResolvers<void>();
   let completed = false;
-  const decision = actor.decide!({ prefix: 'task', message: 'page' }, async () => {
+  const decision = actor.decide({ prefix: 'task', message: 'page' }, async () => {
     await finish.promise; completed = true; return 'saved';
   });
   const closing = actor.close();

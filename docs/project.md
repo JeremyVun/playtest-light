@@ -48,6 +48,44 @@ repository commit does not identify a remote deployment.
 
 ## Decided
 
+Current cleanup brief, verbatim:
+
+> in the interest of keeping this tool light, i need a code review. look for code duplication, dead code, performance issues, unecessary complications and simplification opportunities.
+
+> fix them all. keep going until you don't find anymore
+
+Work plan: separate wait polling from report assertions; remove the obsolete model
+execution/daemon path; share post-action observations; index locators once; bound
+diff memory; paginate history without rescanning prior pages. Preserve cache-aware
+decisions, deterministic replay and Ctrl+C cleanup. Verify the fixes with browser
+and model tests, repeat the performance probes, then review for further concrete
+defects and simplifications. No new CLI options or runtime dependencies.
+
+Cleanup results (2026-10-10): the CLI now has one Codex execution path, using
+isolated app-server decisions; the unused shared-daemon transport, unbounded
+thread API and obsolete `spike-codex.ts` benchmark are removed. References to that
+benchmark in the v1 build plan describe historical work; `tools/spike-context.ts`
+remains the cache comparison probe. Wait predicates are read-only; only explicit
+assertions are added to the report. Post-action evidence is reused by the actor
+and replay, and the actor remembers the same fresh snapshot sent to each decision.
+
+Local synthetic measurements: indexing 10,000 controls fell from about 713 ms to
+2.1 ms; a 10,000-line replacement no longer allocates a 400 MB diff matrix
+(the exact matrix is capped at 4 MB, with a coarse valid diff above that size).
+A 5 KB history page from 10,000 events now opens the file once and takes about
+0.2–0.7 ms, versus 10,000 opens and about 131 ms. These are local probe timings,
+not performance guarantees. Unicode pagination, frozen memory versions, wait
+cancellation and assertion placement have regression coverage. Typechecking now
+also rejects unused imports and locals.
+
+Verification: 125 standard tests passed (the live test is opt-in), strict
+TypeScript checks passed, and the separate real Sol decision test passed. A
+20-second slow-chat fixture completed recording plus two deterministic replays
+with exactly three submissions and three actor decisions; its 50 ms heartbeat
+had a maximum gap of 56 ms. The generated evidence contained no failed polling
+assertions. Final review also fixed stale actor observations, an empty `script:`
+selector falling through to Codex, and app-server pipe/exit error handling.
+
 - **URL targets.** Localhost and deployed apps are the same input. pt does not
   build apps, manage processes, start containers or provision databases.
 - **Small CLI.** init, run, explore, accept and view. run records missing
@@ -69,6 +107,15 @@ repository commit does not identify a remote deployment.
   to preserve cache reuse. A private Codex home keeps actor sessions separate.
   See `backlog/actor-context/` for implementation and measured checks. The broad
   comparative endurance/cache/cost gates remain open.
+- **Long responses.** The actor can await a UI condition while the harness event
+  loop stays responsive. No model call stays open during the wait; timeouts return
+  control without resubmitting. Conditions and maximum waits replay with the
+  baseline. There is no overall time limit or `--minutes` flag; Ctrl+C stops the
+  run and cleans up its browser. See `backlog/async-waits/`.
+- **Actor-owned completion.** The independent grader is deferred by the owner:
+  its predecessor was finicky to tune. The actor uses observed UI outcomes to
+  decide completion; deterministic checks and replay remain. Reconsider a grader
+  only if measured false completions justify the extra complexity.
 - **Baselines.** One stable text baseline beside each story. Version 2 records
   target URL and seeded status, not inferred app commits. Accessibility drift
   remains the oracle; matching-platform screenshot fingerprints warn only.
@@ -106,7 +153,7 @@ settling but exclude evidence capture. Historical five 20-step runs took
 1.82–1.92 seconds including browser startup.
 A separate actual Sol exploration found and reproduced both planted defects
 (stale-list and console-error); findings were saved automatically. The actor's
-checks still need the independent grader described below.
+completion remains its responsibility; the independent grader is deferred.
 
 ## URL-target verification (2026-10-10)
 
@@ -296,7 +343,7 @@ This is the full audit; a design that drops or changes any row must say why.
 | Harness-built context: stable prefix, compact action log, current page, cache-aware | Implemented; bounded checkpoints and exact retrieval | `docs/backlog/actor-context/`; comparative gates open |
 | Compact page: echo removal, caps | Implemented: byte/ref limits, viewport/dialog priority and exact omitted-text inspection; baseline normalizer unchanged | actor-context |
 | Unchanged-page, repeated-action and expectation-mismatch signals | Implemented; unchanged page is not proof of a failed save | actor-context |
-| Actor/grader split; deterministic gate apart from judgement | Missing: the actor writes its own checks | `docs/backlog/grader/` |
+| Actor/grader split; deterministic gate apart from judgement | Actor owns completion; independent grader deferred by owner due tuning cost | `docs/backlog/grader/` is a deferred proposal |
 | Action, expectation, observation and explicit memory recorded per step | Implemented; hidden reasoning is not needed or requested | actor-context |
 | Personas (tester, exploratory, adversarial) and their comparison | Partly: one explorer persona with rotating plans | not planned |
 | Heal with re-anchoring | Not built | milestone 5 |

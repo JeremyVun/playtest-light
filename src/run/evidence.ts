@@ -1,12 +1,18 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { ActResult, Baseline, DecisionResult, Page, Snapshot } from '../types.ts';
+import type { ActResult, Baseline, Check, CheckResult, DecisionResult, Page, Snapshot } from '../types.ts';
 import { unifiedDiff } from './diff.ts';
 import { describeAction, describeCheck, describeIssue } from './format.ts';
 import { findFfmpeg, makeVideo } from './render-video.ts';
 import { runHtml, type RunView, type ViewDecision, type ViewFrame, type ViewSection } from './view-html.ts';
 
 const traces = new WeakMap<Page, PageTrace>();
+
+export async function checkPage(page: Page, condition: Check): Promise<CheckResult> {
+  const result = await page.check(condition);
+  await traces.get(page)?.check(condition, result);
+  return result;
+}
 
 export async function captureResize(page: Page, width: number, durationMs: number): Promise<void> {
   await traces.get(page)?.capture(`Resize to ${width}px`, { ok: true, settleMs: 0, issues: [] }, false, durationMs);
@@ -37,7 +43,7 @@ export class Evidence {
     this.sections.push(section);
     const trace = new PageTrace(this, section, page, this.baseline);
     traces.set(page, trace);
-    await trace.capture('Open page', opened, true, durationMs);
+    opened.snapshot = await trace.capture('Open page', opened, true, durationMs);
     const act = page.act.bind(page);
     page.act = async (action) => {
       const decision = this.activeDecision;
@@ -45,15 +51,7 @@ export class Evidence {
       const result = await act(action);
       const durationMs = Math.round(performance.now() - started);
       const named = result.locator && 'target' in action ? { ...action, target: result.locator } : action;
-      await trace.capture(describeAction(named), result, false, durationMs, decision);
-      return result;
-    };
-    const check = page.check.bind(page);
-    page.check = async (condition) => {
-      const result = await check(condition);
-      const frame = section.frames.at(-1)!;
-      frame.checks.push(`${result.ok ? 'PASS' : 'FAIL'} ${describeCheck(condition)}${result.detail ? `: ${result.detail}` : ''}`);
-      if (!result.ok) await trace.shoot(frame);
+      result.snapshot = await trace.capture(describeAction(named), result, false, durationMs, decision);
       return result;
     };
   }
@@ -111,10 +109,10 @@ class PageTrace {
     this.#baseline = baseline;
   }
 
-  async capture(action: string, result: ActResult, initial = false, durationMs?: number, decision = this.#evidence.activeDecision): Promise<void> {
+  async capture(action: string, result: ActResult, initial = false, durationMs?: number, decision = this.#evidence.activeDecision): Promise<Snapshot | undefined> {
     let snapshot: Snapshot | undefined;
     let captureError: string | undefined;
-    try { snapshot = await this.#page.snapshot(); } catch (error) { captureError = (error as Error).message; }
+    try { snapshot = await this.#page.snapshot({ raw: true }); } catch (error) { captureError = (error as Error).message; }
     const step = initial ? 0 : this.#step + 1;
     const expected = this.#baseline?.steps[step - 1];
     const diff = expected && snapshot ? unifiedDiff(expected.snapshot, snapshot.lines, 2) : [];
@@ -125,6 +123,13 @@ class PageTrace {
     this.#section.frames.push(frame);
     if (this.#evidence.screenshots || !result.ok || diff.length || result.issues.some((issue) => !known.has(issue.key))) await this.shoot(frame);
     if (!initial && result.ok) this.#step++;
+    return snapshot;
+  }
+
+  async check(condition: Check, result: CheckResult): Promise<void> {
+    const frame = this.#section.frames.at(-1)!;
+    frame.checks.push(`${result.ok ? 'PASS' : 'FAIL'} ${describeCheck(condition)}${result.detail ? `: ${result.detail}` : ''}`);
+    if (!result.ok) await this.shoot(frame);
   }
 
   async shoot(frame: ViewFrame): Promise<void> {

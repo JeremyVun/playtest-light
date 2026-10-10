@@ -60,7 +60,7 @@ const story = {
 };
 writeFileSync(story.path, story.prose);
 try {
-  const result = await recordStory(project, story, { minutes: 35, runDir: out, evidence: new Evidence(out, false), progress: console.log });
+  const result = await recordStory(project, story, { runDir: out, evidence: new Evidence(out, false), progress: console.log });
   writeFileSync(join(out, 'result.json'), JSON.stringify(result, null, 2));
   trials.push({ position, rejected, completed });
   writeFileSync(join(out, 'oracle.json'), JSON.stringify(trials, null, 2));

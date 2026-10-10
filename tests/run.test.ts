@@ -14,7 +14,6 @@ import { recordStory, type RecordResult } from '../src/run/record.ts';
 import type { ScriptTurn, TranscriptEntry } from '../src/model/script.ts';
 import type { Project } from '../src/types.ts';
 
-const APP_DIR = join(import.meta.dirname, '..', 'fixtures', 'sample-app');
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'playtest-run-')));
 let project: Project;
 

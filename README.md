@@ -160,6 +160,30 @@ decision), and `trajectory.jsonl` (full events and observations). The run JSON
 includes token usage, cached tokens, unknown usage and checkpoint counts.
 These files belong to disposable run output; replay does not need them.
 
+## Long-running responses
+
+The actor can pause for an observable UI condition, such as Send becoming enabled
+after a chatbot response finishes. The harness waits asynchronously: other work
+can continue, and no model calls run while waiting. The actor can also do other
+work in the app before choosing to wait.
+
+There is no overall time limit to configure. Press Ctrl+C to stop a run, including
+while the actor is waiting; pt closes its browser and removes its temporary profile.
+
+The internal `wait_for` tool accepts up to eight conditions and `timeoutSeconds`
+(default 60; up to 24 hours). The actor chooses how long to wait; a twenty-minute
+wait needs no extra CLI flag. Conditions can check text, elements,
+field values and enabled/disabled controls. The condition must hold on two
+observations at least 250 ms apart. Prefer a completion signal over the first
+streamed text or a spinner disappearing alone.
+
+Timeout returns the current page to the actor without resubmitting. Navigation
+or closing the page cancels the wait. Successful waits are saved in the baseline
+and replayed as conditions, so replay adapts to response speed. Recording still
+performs two verification replays, which can each wait for the app again.
+Wait duration appears in the step filmstrip and is reported separately from
+model time and network settling. There are no extra CLI commands or monitors.
+
 ## Commands
 
 | Command | Purpose |

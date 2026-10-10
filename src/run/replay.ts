@@ -2,8 +2,9 @@ import { fingerprintDistance, FINGERPRINT_THRESHOLD } from '../browser/index.ts'
 import type { Baseline, BaselineStep, Check, Issue, Page, RecordedAction, Story } from '../types.ts';
 import { BASELINE_VERSION, harnessVersion, orderAction, orderCheck, platformId } from './baseline.ts';
 import { unifiedDiff } from './diff.ts';
-import { describeAction } from './format.ts';
+import { pagePath, describeAction } from './format.ts';
 import { openStory, type Run } from './session.ts';
+import { checkPage } from './evidence.ts';
 
 export const SLOW_FACTOR = 3;
 export const SLOW_MIN_MS = 500;
@@ -14,15 +15,6 @@ export type StepResult = BaselineStep & { index: number; ok: boolean; error?: st
 
 export type CheckOutcome = { check: Check; ok: boolean; detail?: string };
 
-function pathOf(url: string): string {
-  try {
-    const u = new URL(url);
-    return u.pathname + u.search;
-  } catch {
-    return url;
-  }
-}
-
 export async function replaySteps(
   page: Page,
   actions: RecordedAction[],
@@ -31,12 +23,12 @@ export async function replaySteps(
   const steps: StepResult[] = [];
   for (const [index, action] of actions.entries()) {
     const result = await page.act(action);
-    const snap = await page.snapshot();
+    const snap = result.snapshot ?? await page.snapshot();
     const step: StepResult = {
       index,
       ok: result.ok,
       action,
-      url: pathOf(snap.url),
+      url: pagePath(snap.url),
       snapshot: snap.lines,
       fingerprint: opts.fingerprint && result.ok ? await page.fingerprint() : '',
       settleMs: result.settleMs,
@@ -52,7 +44,7 @@ export async function replaySteps(
 export async function evaluateChecks(page: Page, checks: Check[]): Promise<CheckOutcome[]> {
   const out: CheckOutcome[] = [];
   for (const check of checks) {
-    const r = await page.check(check);
+    const r = await checkPage(page, check);
     out.push(r.detail ? { check, ok: r.ok, detail: r.detail } : { check, ok: r.ok });
   }
   return out;

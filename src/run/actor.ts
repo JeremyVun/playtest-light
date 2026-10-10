@@ -1,5 +1,6 @@
-import type { Action, ActResult, Check, Issue, Locator, Page, RecordedAction, Target, ToolSpec } from '../types.ts';
-import { describeAction, describeCheck, describeIssue, describeLocator } from './format.ts';
+import type { Action, ActResult, Check, Issue, Locator, Page, RecordedAction, Snapshot, Target, ToolSpec } from '../types.ts';
+import { pagePath, describeAction, describeCheck, describeIssue, describeLocator } from './format.ts';
+import { checkPage } from './evidence.ts';
 
 export const IRREVERSIBLE =
   /\b(delete|remove|pay|purchase|buy|confirm|submit|upgrade|downgrade|sign out|log ?out|send|publish|cancel (plan|subscription|account)|deactivate|revoke|destroy|erase|discard|transfer|place order)\b/i;
@@ -20,8 +21,8 @@ const locatorSchema = {
 const checkSchema = {
   type: 'object',
   description:
-    'A deterministic check. text: the page shows `value`. url: the URL contains `value`. element / absent: an element with `role` and `name` is / is not on the page. value: the field with `role` and `name` has value `value`.',
-  properties: { type: { type: 'string', enum: ['text', 'url', 'element', 'absent', 'value'] }, value: { type: 'string' }, ...locatorSchema },
+    'A deterministic check. text: the page shows `value`. url: the URL contains `value`. element / absent: an element with `role` and `name` is / is not on the page. value: the field with `role` and `name` has value `value`. enabled / disabled: the control has that state.',
+  properties: { type: { type: 'string', enum: ['text', 'url', 'element', 'absent', 'value', 'enabled', 'disabled'] }, value: { type: 'string' }, ...locatorSchema },
   required: ['type'],
 };
 
@@ -71,10 +72,20 @@ export const giveUpTool: ToolSpec = {
   parameters: { type: 'object', properties: { reason: { type: 'string', description: 'What blocked you and where.' } }, required: ['reason'] },
 };
 
+export const waitTool: ToolSpec = {
+  name: 'wait_for',
+  description: 'Pause until all UI conditions hold, without model calls while waiting. Use for delayed or streaming responses, not repeated snapshots or resubmitting. Prefer a positive completion signal; text appearing alone may still be streaming. Conditions must hold twice, 250 ms apart. Navigation cancels the wait. Timeout returns the current page, not proof of a bug.',
+  parameters: { type: 'object', properties: {
+    until: { type: 'array', items: checkSchema, minItems: 1, maxItems: 8 },
+    timeoutSeconds: { type: 'number', exclusiveMinimum: 0, maximum: 86400, description: 'Maximum wait in seconds, default 60. For twenty minutes use 1200.' },
+  }, required: ['until'] },
+};
+
 export function recorderInstructions(): string {
   return `Complete the original user story through the browser, taking the shortest path that fulfills it.
 Batch predictable actions in one act call. Use expect to stop the batch when an important predicted result does not hold. Irreversible-looking clicks without expect stop a batch.
 The current page is accessibility text: roles, exact names, state and live element refs. Use refs only while their controls remain valid; use role/name locators for controls created or replaced by earlier actions. Select uses the visible option label, and value checks compare the displayed value.
+For a pending response, continue other useful actions or call wait_for with observable completion conditions and an appropriate timeout. Do not repeatedly submit or poll through model calls. A quiet network or a successful click does not mean a streamed response is finished.
 When all criteria hold, call done with checks that prove them on the current page. Checks are evaluated and replayed; an executed click alone is not proof of success. If blocked, call give_up with the reason.`;
 }
 
@@ -104,7 +115,8 @@ export class Actor {
   finish: Finish | undefined;
   calls = 0;
   failedActions = 0;
-  deadline = Infinity;
+  waitMs = 0;
+  #wait?: Extract<Action, { type: 'wait' }>;
   #log: (event: TrajectoryEvent) => void;
   #seen: Snap | undefined;
 
@@ -117,11 +129,14 @@ export class Actor {
     return this.#seen;
   }
 
-  // The full snapshot, remembered as what the model has seen.
+  observe(snapshot: Snapshot): void {
+    this.#seen = snapshot;
+  }
+
   async look(): Promise<string> {
     const snap = await this.page.snapshot({ actor: true });
     this.#seen = snap;
-    return `page ${pathOf(snap.url)} title ${JSON.stringify(snap.title)}\n${snap.text}`;
+    return `page ${pagePath(snap.url)} title ${JSON.stringify(snap.title)}\n${snap.text}`;
   }
 
   handle = async (name: string, args: unknown): Promise<string> => {
@@ -129,15 +144,42 @@ export class Actor {
     this.#log({ event: 'call', tool: name, args });
     if (this.finish) return `The session has ended (${this.finish.kind}). Reply with one short line and stop.`;
     try {
-      if (name === 'act') return await this.act(args);
+      if (name === 'act') {
+        const raw = (args as { actions?: { type?: string }[] | { type?: string } })?.actions;
+        if ((Array.isArray(raw) ? raw : [raw]).some(a => a?.type === 'wait')) return 'Use wait_for for waits, outside action batches.';
+        return await this.act(args);
+      }
+      if (name === 'wait_for') return this.waitFor(args);
       if (name === 'done') return await this.done(args);
       if (name === 'give_up') return this.giveUp(args);
     } catch (error) {
       this.#log({ event: 'tool-error', tool: name, error: (error as Error).message });
       throw error;
     }
-    return `Unknown tool ${name}; the tools are act, done and give_up.`;
+    return `Unknown tool ${name}; the tools are act, wait_for, done and give_up.`;
   };
+
+  private waitFor(args: unknown): string {
+    const a = (args ?? {}) as { until?: unknown; timeoutSeconds?: unknown };
+    if (!Array.isArray(a.until) || !a.until.length || a.until.length > 8) return 'wait_for needs 1–8 conditions in until.';
+    const until: Check[] = [];
+    for (const raw of a.until) {
+      const check = parseCheck(raw);
+      if (typeof check === 'string') return `wait_for: ${check}`;
+      until.push(check);
+    }
+    const seconds = a.timeoutSeconds ?? 60;
+    if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0 || seconds > 86400) return 'timeoutSeconds must be greater than zero and at most 86400.';
+    if (this.#wait) return 'A wait is already queued.';
+    this.#wait = { type: 'wait', until, timeoutMs: seconds * 1000 };
+    return `Wait queued for up to ${seconds} seconds. The next decision will receive the result and current page.`;
+  }
+
+  takeWait(): { actions: Action[] } | undefined {
+    const wait = this.#wait;
+    this.#wait = undefined;
+    return wait ? { actions: [wait] } : undefined;
+  }
 
   async act(args: unknown): Promise<string> {
     const raw = (args as { actions?: unknown })?.actions;
@@ -158,17 +200,16 @@ export class Actor {
     const issues: Issue[] = [];
     let stop = '';
     let ran = 0;
+    let observed: Snapshot | undefined;
     for (const [i, plan] of planned.entries()) {
-      if (performance.now() >= this.deadline) {
-        stop = `stopped before ${i + 1}: time budget spent`;
-        break;
-      }
       const { expect, ...action } = plan;
+      const started = performance.now();
       const result = await this.page.act(action as Action);
+      if (action.type === 'wait') this.waitMs += Math.round(performance.now() - started);
       ran = i + 1;
       issues.push(...result.issues);
-      this.#log({ event: 'action', action, expect, ok: result.ok, error: result.error, locator: result.locator, settleMs: result.settleMs, issues: result.issues });
-      const observed = await this.page.snapshot({ raw: true });
+      this.#log({ event: 'action', action, expect, ok: result.ok, error: result.error, locator: result.locator, settleMs: result.settleMs, waitMs: result.waitMs, issues: result.issues });
+      observed = result.snapshot ?? await this.page.snapshot({ raw: true });
       this.#log({ event: 'observation', url: observed.url, title: observed.title, text: observed.rawText ?? observed.text });
       if (!result.ok) {
         this.failedActions++;
@@ -180,7 +221,7 @@ export class Actor {
       lines.push(`${i + 1} ok   ${describeAction(this.actions.at(-1)!)}`);
       const unmet: string[] = [];
       for (const check of expect ?? []) {
-        const r = await this.page.check(check);
+        const r = await checkPage(this.page, check);
         if (!r.ok) unmet.push(`${describeCheck(check)} (${r.detail})`);
       }
       if (unmet.length) {
@@ -199,17 +240,16 @@ export class Actor {
       this.issues.push(...issues);
       lines.push('new problems noticed:', ...issues.map((i) => `  ${describeIssue(i)}`));
     }
-    lines.push(await this.#snapshotText());
+    lines.push(this.#snapshotText(observed!));
     const text = lines.join('\n');
     this.#log({ event: 'act', count: planned.length, ran, stop, result: text });
     return text;
   }
 
-  async #snapshotText(): Promise<string> {
+  #snapshotText(snap: Snapshot): string {
     const before = this.#seen;
-    const snap = await this.page.snapshot({ actor: true });
     this.#seen = snap;
-    const head = `page ${pathOf(snap.url)} title ${JSON.stringify(snap.title)}`;
+    const head = `page ${pagePath(snap.url)} title ${JSON.stringify(snap.title)}`;
     if (before && before.text === snap.text) return `${head}\nsnapshot: unchanged`;
     return `${head}\nsnapshot:\n${snap.text}`;
   }
@@ -224,11 +264,11 @@ export class Actor {
       if (typeof parsed === 'string') return `done refused: check ${i + 1} is invalid: ${parsed}`;
       checks.push(parsed);
     }
-    if (!checks.length) return 'done refused: give at least one check that proves the story is complete (text, url, element, absent or value).';
+    if (!checks.length) return 'done refused: give at least one check that proves the story is complete (text, url, element, absent, value, enabled or disabled).';
     const lines: string[] = [];
     let failures = 0;
     for (const [i, check] of checks.entries()) {
-      const r = await this.page.check(check);
+      const r = await checkPage(this.page, check);
       if (!r.ok) failures++;
       lines.push(`${i + 1} ${r.ok ? 'ok  ' : 'FAIL'} ${describeCheck(check)}${r.ok ? '' : `: ${r.detail}`}`);
     }
@@ -243,15 +283,6 @@ export class Actor {
     this.finish = { kind: 'give_up', reason };
     this.#log({ event: 'give_up', reason });
     return 'Given up. Reply with one short line and stop.';
-  }
-}
-
-function pathOf(url: string): string {
-  try {
-    const u = new URL(url);
-    return u.pathname + u.search;
-  } catch {
-    return url;
   }
 }
 
@@ -294,6 +325,8 @@ export function parseCheck(raw: unknown): Check | string {
     case 'url':
       return value ? { type: o.type, value } : `${o.type} check needs a value`;
     case 'element':
+    case 'enabled':
+    case 'disabled':
     case 'absent': {
       const l = parseLocator(o);
       return typeof l === 'string' ? `${o.type} check ${l}` : { type: o.type, locator: l };
@@ -304,7 +337,7 @@ export function parseCheck(raw: unknown): Check | string {
       return value === undefined ? 'value check needs a value' : { type: 'value', locator: l, value };
     }
     default:
-      return `unknown check type ${JSON.stringify(o.type)} (text, url, element, absent, value)`;
+      return `unknown check type ${JSON.stringify(o.type)} (text, url, element, absent, value, enabled, disabled)`;
   }
 }
 
@@ -348,6 +381,14 @@ export function parseAction(raw: unknown): PlannedAction | string {
     }
     case 'back':
       return withExpect({ type: 'back' });
+    case 'wait': {
+      if (!Array.isArray(o.until) || !o.until.length || o.until.length > 8) return 'wait needs 1–8 conditions';
+      const until = o.until.map(parseCheck);
+      const error = until.find(c => typeof c === 'string');
+      if (error) return String(error);
+      if (typeof o.timeoutMs !== 'number' || !Number.isFinite(o.timeoutMs) || o.timeoutMs <= 0 || o.timeoutMs > 86_400_000) return 'wait needs timeoutMs greater than zero and at most 86400000';
+      return { type: 'wait', until: until as Check[], timeoutMs: o.timeoutMs };
+    }
     case 'scroll': {
       const direction = o.direction === 'up' ? 'up' : 'down';
       return withExpect(target ? { type: 'scroll', direction, target } : { type: 'scroll', direction });

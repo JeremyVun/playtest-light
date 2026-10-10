@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Transport } from '../src/model/rpc.ts';
-import { CodexModel, connectCodex, explainTurnError, threadStartParams } from '../src/model/codex.ts';
+import { connectCodex, explainTurnError, threadStartParams } from '../src/model/codex.ts';
+import { CodexDecisions } from '../src/model/decisions.ts';
 import type { ToolSpec } from '../src/types.ts';
 
 type ServerApi = {
@@ -78,7 +79,6 @@ function turnScript(steps: (api: ServerApi) => Promise<void>): Handler {
 }
 
 const completed = (status = 'completed', error: object | null = null) => ({ threadId: 'th-1', turn: { id: 'turn-1', status, error, items: [] } });
-const message = (text: string, phase: string | null) => ({ threadId: 'th-1', turnId: 'turn-1', item: { type: 'agentMessage', id: `m-${text}`, text, phase } });
 
 test('thread/start asks for an ephemeral thread with only our tools and our instructions', () => {
   const params = threadStartParams({ name: 'gpt-6.1-sol', effort: 'low' }, { instructions: 'Be a tester.', tools: [ping] }, ['blender']) as any;
@@ -97,45 +97,6 @@ test('thread/start asks for an ephemeral thread with only our tools and our inst
   assert.deepEqual(params.config.notify, []);
 });
 
-test('send routes every tool call to onTool and resolves with the final answer', async () => {
-  const outputs: any[] = [];
-  const server = fakeServer(
-    turnScript(async (api) => {
-      for (const n of [1, 2]) {
-        outputs.push(await api.request('item/tool/call', { threadId: 'th-1', turnId: 'turn-1', callId: `c${n}`, namespace: null, tool: 'ping', arguments: { n } }));
-      }
-      outputs.push(await api.request('item/tool/call', { threadId: 'th-1', turnId: 'turn-1', callId: 'c3', namespace: null, tool: 'boom', arguments: {} }));
-      api.notify('item/completed', message('working', 'commentary'));
-      api.notify('item/completed', message('all done', 'final_answer'));
-      api.notify('turn/completed', completed());
-    }),
-  );
-  const model = new CodexModel({ name: 'gpt-6.1-sol', effort: 'medium' }, { connect: async () => server.transport });
-  const thread = await model.startThread({ instructions: 'x', tools: [ping] });
-  const calls: unknown[] = [];
-  const result = await thread.send('go', async (name, args) => {
-    calls.push([name, args]);
-    if (name === 'boom') throw new Error('element not found');
-    return `ok ${(args as any).n}`;
-  });
-  assert.equal(result.text, 'all done');
-  assert.deepEqual(calls, [
-    ['ping', { n: 1 }],
-    ['ping', { n: 2 }],
-    ['boom', {}],
-  ]);
-  assert.deepEqual(outputs, [
-    { contentItems: [{ type: 'inputText', text: 'ok 1' }], success: true },
-    { contentItems: [{ type: 'inputText', text: 'ok 2' }], success: true },
-    { contentItems: [{ type: 'inputText', text: 'element not found' }], success: false },
-  ]);
-  const turnStart = server.received.find((r) => r.method === 'turn/start')!;
-  assert.deepEqual(turnStart.params, { threadId: 'th-1', input: [{ type: 'text', text: 'go', text_elements: [] }], effort: 'medium' });
-  const threadStart = server.received.find((r) => r.method === 'thread/start')!;
-  assert.equal(threadStart.params.config['mcp_servers.docs.enabled'], false);
-  assert.ok(server.received.some((r) => r.method === 'initialized'));
-});
-
 test('approval and input requests are declined', async () => {
   const answers: Record<string, any> = {};
   const server = fakeServer(
@@ -145,9 +106,9 @@ test('approval and input requests are declined', async () => {
       api.notify('turn/completed', completed());
     }),
   );
-  const model = new CodexModel({ name: 'gpt-6.1-sol' }, { connect: async () => server.transport });
-  const thread = await model.startThread({ instructions: 'x', tools: [] });
-  assert.deepEqual(await thread.send('go', async () => ''), { text: '' });
+  const thread = await CodexDecisions.open({ name: 'gpt-6.1-sol' }, { instructions: 'x', tools: [] }, { connect: async () => server.transport });
+  assert.equal((await thread.decide({ prefix: '', message: 'go' }, async () => '')).text, '');
+  await thread.close();
   assert.deepEqual(answers['item/commandExecution/requestApproval'], { decision: 'decline' });
   assert.deepEqual(answers['item/fileChange/requestApproval'], { decision: 'decline' });
   assert.ok(answers.execCommandApproval.decision.denied);
@@ -164,9 +125,8 @@ test('a failed turn rejects with a readable reason', async () => {
       api.notify('turn/completed', completed('failed', error));
     }),
   );
-  const model = new CodexModel({ name: 'gpt-6.1-sol' }, { connect: async () => server.transport });
-  const thread = await model.startThread({ instructions: 'x', tools: [] });
-  await assert.rejects(thread.send('go', async () => ''), /sign-in is missing or expired; run `codex login` \(Your session has expired\.\)/);
+  const thread = await CodexDecisions.open({ name: 'gpt-6.1-sol' }, { instructions: 'x', tools: [] }, { connect: async () => server.transport });
+  await assert.rejects(thread.decide({ prefix: '', message: 'go' }, async () => ''), /sign-in is missing or expired; run CODEX_HOME=.* codex login \(Your session has expired\.\)/);
 });
 
 test('an unknown model names the model', () => {
@@ -177,43 +137,11 @@ test('an unknown model names the model', () => {
   assert.match(message, /^Model "gpt-9" is not available through Codex: The 'gpt-9' model is not supported/);
 });
 
-test('a dropped connection fails the running turn', async () => {
-  let drop!: (error: Error) => void;
-  const server = fakeServer(turnScript(async () => drop(new Error('daemon went away'))));
-  drop = server.drop;
-  const model = new CodexModel({ name: 'gpt-6.1-sol' }, { connect: async () => server.transport });
-  const thread = await model.startThread({ instructions: 'x', tools: [] });
-  await assert.rejects(thread.send('go', async () => ''), /Codex app-server connection closed: daemon went away/);
-  await assert.rejects(thread.send('again', async () => ''), /thread is closed/);
-  const next = fakeServer(base);
-  let connects = 0;
-  const reconnecting = new CodexModel({ name: 'gpt-6.1-sol' }, { connect: async () => (connects++ ? next.transport : server.transport) });
-  await reconnecting.connect();
-  server.drop(new Error('restart'));
-  await reconnecting.startThread({ instructions: 'x', tools: [] });
-  assert.equal(connects, 2, 'a dropped connection is replaced on the next thread');
-});
-
-test('one turn at a time per thread, and close interrupts', async () => {
-  const server = fakeServer(turnScript(async () => {}));
-  const model = new CodexModel({ name: 'gpt-6.1-sol' }, { connect: async () => server.transport });
-  const thread = await model.startThread({ instructions: 'x', tools: [] });
-  const running = thread.send('first', async () => '');
-  await assert.rejects(thread.send('second', async () => ''), /already running/);
-  const rejected = assert.rejects(running, /closed during a turn/);
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  await thread.close();
-  await rejected;
-  assert.ok(server.received.some((r) => r.method === 'turn/interrupt' && r.params.turnId === 'turn-1'));
-  assert.ok(server.received.some((r) => r.method === 'thread/unsubscribe'));
-});
-
 test('a missing Codex CLI says how to fix it', async () => {
-  await assert.rejects(connectCodex('gpt-6.1-sol', { transport: 'spawn', codexCommand: 'codex-not-installed-here' }), /`codex-not-installed-here` is not on PATH; install the Codex CLI and run `codex login`/);
+  await assert.rejects(connectCodex({ codexCommand: 'codex-not-installed-here' }), /`codex-not-installed-here` is not on PATH; install the Codex CLI and run `codex login`/);
 });
 
 test('a signed-out Codex is reported before any thread starts', async () => {
   const server = fakeServer((method, params, api) => (method === 'account/read' ? { account: null, requiresOpenaiAuth: true } : base(method, params, api)));
-  const model = new CodexModel({ name: 'gpt-6.1-sol' }, { connect: async () => server.transport });
-  await assert.rejects(model.startThread({ instructions: 'x', tools: [] }), /Codex is not signed in; run `codex login`/);
+  await assert.rejects(connectCodex({ connect: async () => server.transport }), /Playtest is not signed in; run CODEX_HOME=.* codex login/);
 });

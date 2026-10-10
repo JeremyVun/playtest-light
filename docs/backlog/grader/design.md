@@ -1,5 +1,14 @@
 # Actor and grader split
 
+Deferred by the owner, 2026-10-10. The actor remains responsible for completion.
+The earlier independent grader was finicky to tune; added cost and complexity
+need demonstrated value before revisiting it. The design below is historical,
+not an instruction to implement a grader.
+
+Owner's current direction, verbatim:
+
+> i think the models now adays are good enough that we dont need to worry about the gap between belief and actually succeeding at a goal. As long as the actor interacted with the app the same way a human user would.
+
 Today the actor that plays a story also writes the story's assertions: at
 `done` it picks checks from five fixed kinds (text, url, element, absent,
 value), the harness evaluates them, and they are replayed on every `check`.

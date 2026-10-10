@@ -21,6 +21,7 @@ export type Entry = {
   focused: boolean;
   value?: string;
   checked?: string;
+  disabled?: boolean;
 };
 
 const ACTIONABLE = new Set([
@@ -140,6 +141,7 @@ export function buildEntries(nodes: AXNode[]): Entry[] {
         focused: prop(node, 'focused') === true,
         value,
         checked,
+        disabled: prop(node, 'disabled') === true,
       });
       childDepth = depth + 1;
     }
@@ -161,14 +163,23 @@ export function normalizedLines(entries: Entry[]): string[] {
 }
 
 // nth is set only when the role and name are not unique on the page.
-export function locatorFor(entries: Entry[], index: number): { role: string; name: string; nth?: number } {
-  const entry = entries[index];
-  const same = entries.filter((e) => e.role === entry.role && e.name === entry.name);
-  if (same.length === 1) return { role: entry.role, name: entry.name };
-  return { role: entry.role, name: entry.name, nth: same.indexOf(entry) };
+export function indexLocators(entries: Entry[]): { role: string; name: string; nth?: number }[] {
+  const groups = new Map<string, { role: string; name: string; nth?: number }[]>();
+  return entries.map(({ role, name }) => {
+    const key = JSON.stringify([role, name]);
+    const locator: { role: string; name: string; nth?: number } = { role, name };
+    const same = groups.get(key);
+    if (same) {
+      if (same.length === 1) same[0].nth = 0;
+      locator.nth = same.length;
+      same.push(locator);
+    } else groups.set(key, [locator]);
+    return locator;
+  });
 }
 
 export function findEntry(entries: Entry[], locator: { role: string; name: string; nth?: number }): Entry | undefined {
   const name = collapse(locator.name);
-  return entries.filter((e) => e.role === locator.role && e.name === name)[locator.nth ?? 0];
+  let nth = locator.nth ?? 0;
+  return entries.find(e => e.role === locator.role && e.name === name && nth-- === 0);
 }

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { Actor, IRREVERSIBLE, parseAction, parseCheck } from '../src/run/actor.ts';
+import { IRREVERSIBLE, parseAction, parseCheck } from '../src/run/actor.ts';
 import { formatBaseline, parseBaseline } from '../src/run/baseline.ts';
-import { unifiedDiff } from '../src/run/diff.ts';
+import { diffLines, unifiedDiff } from '../src/run/diff.ts';
 import { checkStory, SLOW_RERUNS, type StoryResult } from '../src/run/replay.ts';
 import { checkMarkdown, checkSummary, stepList } from '../src/run/report.ts';
 import type { Run } from '../src/run/session.ts';
@@ -70,20 +70,6 @@ test('irreversible names', () => {
   for (const name of ['Delete "Draft"', 'Delete task', 'Pay now', 'Confirm', 'Sign out', 'Upgrade to Pro', 'Remove member'])
     assert.ok(IRREVERSIBLE.test(name), name);
   for (const name of ['Sign in', 'Save task', 'New task', 'Golden Checkout', 'Payment details', 'Next']) assert.ok(!IRREVERSIBLE.test(name), name);
-});
-
-test('a batch stops at its deadline after settling the current action', async () => {
-  let mutations = 0;
-  const page = {
-    act: async () => { mutations++; actor.deadline = 0; return { ok: true, settleMs: 0, issues: [] }; },
-    snapshot: async () => ({ url: 'http://local/', title: 'Task', text: 'textbox "Notes"', lines: [] }),
-  } as unknown as Page;
-  const actor = new Actor(page);
-  const action = { type: 'fill', target: { role: 'textbox', name: 'Notes' }, value: 'saved' };
-  const result = await actor.act({ actions: [action, action] });
-  assert.equal(mutations, 1);
-  assert.equal(actor.actions.length, 1);
-  assert.match(result, /stopped before 2: time budget spent/);
 });
 
 test('the check summary is one line per passing story and details for failures', () => {
@@ -244,4 +230,14 @@ test('drift that repeats on later steps is collapsed in the summary and the repo
 test('step lists name runs as ranges', () => {
   assert.equal(stepList([3, 4, 5, 7, 9, 10]), '3-5, 7, 9, 10');
   assert.equal(stepList([2]), '2');
+});
+
+test('large snapshot changes preserve both inputs without a quadratic diff matrix', () => {
+  const a = ['start', ...Array.from({ length: 10000 }, (_, i) => `old ${i}`), 'end'];
+  const b = ['start', ...Array.from({ length: 10000 }, (_, i) => `new ${i}`), 'end'];
+  const diff = diffLines(a, b);
+  assert.deepEqual(diff.filter(d => d.op !== '+').map(d => d.line), a);
+  assert.deepEqual(diff.filter(d => d.op !== '-').map(d => d.line), b);
+  assert.equal(diff[0].op, ' ');
+  assert.equal(diff.at(-1)!.op, ' ');
 });

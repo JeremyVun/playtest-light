@@ -12,6 +12,7 @@ export type Action =
   | { type: 'hover'; target: Target }
   | { type: 'navigate'; url: string }
   | { type: 'back' }
+  | { type: 'wait'; until: Check[]; timeoutMs: number }
   | { type: 'scroll'; direction: 'up' | 'down'; target?: Target };
 
 // Durable form stored in baselines: targets are always locators.
@@ -22,6 +23,8 @@ export type Check =
   | { type: 'url'; value: string }
   | { type: 'element'; locator: Locator }
   | { type: 'absent'; locator: Locator }
+  | { type: 'enabled'; locator: Locator }
+  | { type: 'disabled'; locator: Locator }
   | { type: 'value'; locator: Locator; value: string };
 
 export type IssueKind =
@@ -58,6 +61,8 @@ export type ActResult = {
   locator?: Locator;
   error?: string;
   settleMs: number;
+  waitMs?: number;
+  snapshot?: Snapshot;
   // Everything new since the previous act or goto: console, exceptions, failed requests,
   // and layout issues of a URL path this page had not visited yet, at every configured width.
   issues: Issue[];
@@ -102,15 +107,13 @@ export type DecisionInput = { prefix: string; message: string };
 export type DecisionResult = { text: string; tool?: string; usage?: ModelUsage; ms: number; turnId?: string; backend?: string };
 
 export interface ModelThread {
-  // One user turn: the model may call tools many times; resolves when the turn ends.
-  send(message: string, onTool: ToolHandler): Promise<{ text: string }>;
-  decide?(input: DecisionInput, onTool: ToolHandler): Promise<DecisionResult>;
+  decide(input: DecisionInput, onTool: ToolHandler): Promise<DecisionResult>;
   close(): Promise<void>;
 }
 
 export interface Model {
   name: string;
-  startThread(opts: { instructions: string; tools: ToolSpec[]; bounded?: boolean }): Promise<ModelThread>;
+  startThread(opts: { instructions: string; tools: ToolSpec[] }): Promise<ModelThread>;
 }
 
 export type Config = {

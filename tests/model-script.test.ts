@@ -13,40 +13,25 @@ function scratch(): { dir: string; done: () => void } {
   return { dir, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-test('each send plays the next turn through onTool in order and returns its text', async () => {
+test('decisions consume one scripted step and propagate tool failures', async () => {
   const entries: TranscriptEntry[] = [];
-  const model = new ScriptModel(
-    [
-      [{ tool: 'act', args: { n: 1 } }, { tool: 'act', args: { n: 2 } }, { text: 'first' }],
-      [{ tool: 'done', args: { summary: 'ok' } }],
-    ],
-    { transcript: (entry) => entries.push(entry) },
-  );
+  const model = new ScriptModel([[{ tool: 'act', args: { n: 1 } }, { text: 'first' }], [{ tool: 'done' }]], { transcript: entry => entries.push(entry) });
   const thread = await model.startThread({ instructions: 'x', tools });
-  const calls: unknown[] = [];
-  const handler = async (name: string, args: unknown) => {
-    calls.push([name, args]);
+  const input = { prefix: 'task', message: 'page' };
+  const calls: string[] = [];
+  const handler = async (name: string) => {
+    calls.push(name);
     if (name === 'done') throw new Error('checks failed');
-    return `ran ${(args as { n: number }).n}`;
+    return 'ran';
   };
-  assert.deepEqual(await thread.send('play', handler), { text: 'first' });
-  assert.deepEqual(await thread.send('again', handler), { text: '' });
-  assert.deepEqual(calls, [
-    ['act', { n: 1 }],
-    ['act', { n: 2 }],
-    ['done', { summary: 'ok' }],
-  ]);
-  assert.deepEqual(entries, [
-    { event: 'thread', thread: 1, tools: ['act'] },
-    { event: 'send', thread: 1, turn: 1, message: 'play' },
-    { event: 'tool', thread: 1, turn: 1, tool: 'act', args: { n: 1 }, ok: true, output: 'ran 1' },
-    { event: 'tool', thread: 1, turn: 1, tool: 'act', args: { n: 2 }, ok: true, output: 'ran 2' },
-    { event: 'text', thread: 1, turn: 1, text: 'first' },
-    { event: 'send', thread: 1, turn: 2, message: 'again' },
-    { event: 'tool', thread: 1, turn: 2, tool: 'done', args: { summary: 'ok' }, ok: false, output: 'checks failed' },
-  ]);
+  assert.equal((await thread.decide(input, handler)).text, 'ran');
+  assert.equal((await thread.decide(input, handler)).text, 'first');
+  await assert.rejects(thread.decide(input, handler), /checks failed/);
+  assert.deepEqual(calls, ['act', 'done']);
   assert.equal(model.remaining, 0);
-  await assert.rejects(thread.send('more', handler), /no scripted turn left for message 3/);
+  assert.equal(entries.filter(e => e.event === 'send').length, 3);
+  await assert.rejects(thread.decide(input, handler), /no scripted turn left/);
+  await thread.close();
 });
 
 test('scripts are validated with the file and position', () => {
@@ -66,7 +51,8 @@ test('PLAYTEST_MODEL=script:<file> selects the scripted backend and writes the t
     const model = openModel({ name: 'gpt-6.1-sol' }, { env: { PLAYTEST_MODEL: `script:${script}`, PLAYTEST_MODEL_TRANSCRIPT: transcript } });
     assert.equal(model.name, `script:${script}`);
     const thread = await model.startThread({ instructions: 'x', tools });
-    assert.deepEqual(await thread.send('go', async () => 'clicked'), { text: 'saved' });
+    assert.equal((await thread.decide({ prefix: '', message: 'go' }, async () => 'clicked')).text, 'clicked');
+    assert.equal((await thread.decide({ prefix: '', message: 'go' }, async () => '')).text, 'saved');
     const lines = readFileSync(transcript, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     assert.deepEqual(lines[2], { event: 'tool', thread: 1, turn: 1, tool: 'act', args: { click: 'Save' }, ok: true, output: 'clicked' });
   } finally {
@@ -77,6 +63,7 @@ test('PLAYTEST_MODEL=script:<file> selects the scripted backend and writes the t
 test('without PLAYTEST_MODEL the Codex backend is chosen, lazily', () => {
   const model = openModel({ name: 'gpt-6.1-sol', effort: 'low' }, { env: {} });
   assert.equal(model.name, 'codex:gpt-6.1-sol@low');
+  assert.throws(() => openModel({ name: 'x' }, { env: { PLAYTEST_MODEL: 'script:' } }), /PLAYTEST_MODEL must be script:<file>/);
   assert.throws(() => openModel({ name: 'x' }, { env: { PLAYTEST_MODEL: 'gpt-6.1-sol' } }), /PLAYTEST_MODEL must be script:<file>/);
 });
 

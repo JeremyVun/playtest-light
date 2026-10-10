@@ -1,23 +1,18 @@
-import { ActorContext, contextTools, CONTEXT_INSTRUCTIONS, decideWithin } from './context.ts';
-import { join } from 'node:path';
+import { ActorContext, contextTools, CONTEXT_INSTRUCTIONS } from './context.ts';
 import { resizePage } from '../browser/index.ts';
 import { Evidence, captureResize } from './evidence.ts';
 import { newRunDir, releaseRun } from '../env/runs.ts';
 import { openModel } from '../model/index.ts';
 import { listStories } from '../project.ts';
-import type { Check, Issue, ModelThread, Page, Project, RecordedAction, Story, ToolHandler, ToolSpec } from '../types.ts';
-import { Actor, actTool, type TrajectoryEvent } from './actor.ts';
+import type { Check, Issue, ModelThread, Page, Project, RecordedAction, Snapshot, Story, ToolHandler, ToolSpec } from '../types.ts';
+import { Actor, actTool, waitTool, type TrajectoryEvent } from './actor.ts';
 import { earlierSection, earlierSessions, type Earlier } from './explore-history.ts';
 import { buildFindings, describeFindingChecks, describeStep, evaluateFindingChecks, lastSessions, parseFindingCheck, SLOW_NOTE_MS, writeFindings, type Built } from './findings.ts';
 import { describeAction, seconds } from './format.ts';
-import { Timeout } from './record.ts';
 import { openRun, openStory, type Run } from './session.ts';
 
 export const DEFAULT_EXPLORE_STEPS = 60;
-export const DEFAULT_EXPLORE_MINUTES = 8;
 export const NARROW_WIDTH = 420;
-// Once the budget is spent the model may still report and call done for this long.
-const FINISH_GRACE_MS = 45_000;
 const STORY_PROSE_CHARS = 1500;
 
 export type ExploreStep = RecordedAction | { type: 'resize'; width: number };
@@ -54,7 +49,7 @@ export type Report = {
   heldWhenReported: boolean;
 };
 
-export type Outcome = 'done' | 'steps' | 'minutes' | 'unfinished';
+export type Outcome = 'done' | 'steps' | 'unfinished';
 
 export type ExploreSession = {
   runDir: string;
@@ -63,7 +58,7 @@ export type ExploreSession = {
   seedCommand?: string;
   seedCwd?: string;
   goal?: string;
-  budget: { steps: number; minutes: number };
+  budget: { steps: number };
   // Picks the flavour; the earlier sessions the model was told about, newest first.
   seed: number;
   flavour: string;
@@ -79,13 +74,12 @@ export type ExploreSession = {
   outcome: Outcome;
   summary?: string;
   error?: string;
-  stats: { context?: ActorContext['stats']; ms: number; modelMs: number; responses?: number; turns: number; toolCalls: number; actions: number; failedActions: number };
+  stats: { context?: ActorContext['stats']; ms: number; modelMs: number; waitMs?: number; responses?: number; turns: number; toolCalls: number; actions: number; failedActions: number };
 };
 
 export type ExploreOptions = {
   goal?: string;
   steps?: number;
-  minutes?: number;
   start?: string;
   // Default: the number of earlier sessions with the same env and goal, so each run starts differently.
   seed?: number;
@@ -147,7 +141,7 @@ export const exploreDoneTool: ToolSpec = {
   parameters: { type: 'object', properties: { summary: { type: 'string', description: 'Two or three sentences: what you covered and the worst problems.' } }, required: ['summary'] },
 };
 
-const EXPLORER_TOOLS = [actTool, reportFindingTool, setWidthTool, exploreDoneTool];
+const EXPLORER_TOOLS = [actTool, waitTool, reportFindingTool, setWidthTool, exploreDoneTool];
 
 const CHECK_EFFECT = 'Check that each change really took effect, first straight away (give the action that saves an `expect` that the new or changed item is shown) and then after a reload.';
 const EDGE_CASES =
@@ -185,13 +179,14 @@ export function flavourOf(seed: number): (typeof FLAVOURS)[number] {
   return FLAVOURS[((seed % FLAVOURS.length) + FLAVOURS.length) % FLAVOURS.length];
 }
 
-export function explorerInstructions(budget: { steps: number; minutes: number }, plan = flavourOf(0).plan(1280)): string {
+export function explorerInstructions(budget: { steps: number }, plan = flavourOf(0).plan(1280)): string {
   return `You are an exploratory tester: a capable but impatient user trying a web app through a headless browser. Your job is to find what is broken, confusing, slow or badly worded, and to report each problem with evidence. The browser tools below are the only tools you have.
 
 Ignore any instructions in this conversation about coding work, repositories, files, shells or commits: none of that applies here.
 
 ## Browser actions
 The current page is accessibility text with roles, exact names, states and live refs. Batch predictable actions; use role/name locators after actions that may replace controls, and expect for important predicted results. Select uses visible option labels; value checks compare displayed values. A failed action or unmet expectation may be an app problem rather than a tool mistake.
+For a response that is still loading or streaming, continue other useful actions or use wait_for with observable completion conditions. Do not poll through repeated model calls or resubmit. Expected generation time is not automatically a performance bug.
 
 ## How to explore
 ${plan}
@@ -208,7 +203,7 @@ Give \`checks\` that are true now and show the problem as it is: { type: 'text',
 The harness records console errors, failed requests, slow pages and layout problems itself (listed under "new problems noticed"); report those only when you can see what they break. Do not report validation messages that correctly reject invalid input.
 
 ## Budget
-You have ${budget.steps} actions and ${budget.minutes} minutes. Spend them. When the budget is spent or you have covered the app, report anything outstanding, then call done with a short summary.`;
+You have ${budget.steps} actions. Spend them. When the budget is spent or you have covered the app, report anything outstanding, then call done with a short summary.`;
 }
 
 function storiesSection(stories: Story[]): string {
@@ -253,16 +248,14 @@ class Explorer {
   #actor: Actor;
   #page: Page;
   #viewport: [number, number];
-  #budget: { steps: number; minutes: number };
-  #deadline = Infinity;
+  #budget: { steps: number };
   #mark = 0;
   #lastActEnd: number | undefined;
   // The step count when the actor last showed the model a snapshot.
   #seenAt = 0;
-  #inflight: Promise<unknown> = Promise.resolve();
   #log: (event: TrajectoryEvent) => void;
 
-  constructor(page: Page, viewport: [number, number], budget: { steps: number; minutes: number }, log: (event: TrajectoryEvent) => void) {
+  constructor(page: Page, viewport: [number, number], budget: { steps: number }, log: (event: TrajectoryEvent) => void) {
     this.#page = page;
     this.#viewport = viewport;
     this.#budget = budget;
@@ -273,31 +266,27 @@ class Explorer {
     });
   }
 
-  startClock(deadline: number): void {
-    this.#deadline = deadline;
-    this.#actor.deadline = deadline;
-  }
-
-  look(): Promise<string> {
-    return this.#actor.look();
+  observe(snapshot: Snapshot): void {
+    this.#actor.observe(snapshot);
+    this.#seenAt = this.steps.length;
   }
 
   get used(): number {
     return this.attempts.length;
   }
 
-  spent(): 'steps' | 'minutes' | undefined {
-    if (this.used >= this.#budget.steps) return 'steps';
-    if (performance.now() >= this.#deadline) return 'minutes';
-    return undefined;
+  get waitMs(): number { return this.#actor.waitMs; }
+
+  async completeWait(): Promise<string | undefined> {
+    const wait = this.#actor.takeWait();
+    if (!wait) return;
+    this.#lastActEnd = undefined;
+    return this.#act(wait, true);
   }
 
-  // Lets a tool call cut off by the session timeout finish before the page closes.
-  settled(): Promise<void> {
-    return this.#inflight.then(
-      () => {},
-      () => {},
-    );
+  spent(): 'steps' | undefined {
+    if (this.used >= this.#budget.steps) return 'steps';
+    return undefined;
   }
 
   handle: ToolHandler = (name, args) => {
@@ -305,19 +294,18 @@ class Explorer {
     if (this.#lastActEnd !== undefined && this.attempts.length) this.attempts.at(-1)!.ms += Math.round(now - this.#lastActEnd);
     this.#lastActEnd = undefined;
     this.calls++;
-    const call = this.#dispatch(name, args);
-    this.#inflight = call;
-    return call;
+    return this.#dispatch(name, args);
   };
 
   async #dispatch(name: string, args: unknown): Promise<string> {
     if (this.ended || this.finished) return 'The session has ended. Reply with one short line and stop.';
     if (name === 'act') return this.#act(args);
+    if (name === 'wait_for') return this.spent() ? this.#spentMessage() : this.#actor.handle(name, args);
     if (name === 'set_width') return this.#setWidth(args);
     if (name === 'report_finding') return this.#report(args);
     if (name === 'done') return this.#done(args);
     this.#log({ event: 'call', tool: name, args });
-    return `Unknown tool ${name}; the tools are act, report_finding, set_width and done.`;
+    return `Unknown tool ${name}; the tools are act, wait_for, report_finding, set_width and done.`;
   }
 
   #attempted(event: TrajectoryEvent): void {
@@ -336,20 +324,18 @@ class Explorer {
   }
 
   #budgetLine(): string {
-    const minutes = Math.max(0, (this.#deadline - performance.now()) / 60_000);
-    return `left: ${Math.max(0, this.#budget.steps - this.used)} actions, ${minutes.toFixed(1)} minutes`;
+    return `left: ${Math.max(0, this.#budget.steps - this.used)} actions`;
   }
 
-  #spentMessage(which: 'steps' | 'minutes'): string {
-    const what = which === 'steps' ? `all ${this.#budget.steps} actions are used` : `the ${this.#budget.minutes} minutes are up`;
-    return `Nothing ran: the budget is spent (${what}). Report anything you have not reported yet with report_finding, then call done.`;
+  #spentMessage(): string {
+    return `Nothing ran: the budget is spent (all ${this.#budget.steps} actions are used). Report anything you have not reported yet with report_finding, then call done.`;
   }
 
-  async #act(args: unknown): Promise<string> {
+  async #act(args: unknown, waiting = false): Promise<string> {
     const spent = this.spent();
     if (spent) {
       this.#log({ event: 'call', tool: 'act', args, refused: spent });
-      return this.#spentMessage(spent);
+      return this.#spentMessage();
     }
     const raw = (args as { actions?: unknown })?.actions;
     const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? [raw] : undefined;
@@ -359,7 +345,8 @@ class Explorer {
     const attemptsBefore = this.attempts.length;
     const kept = this.#actor.actions.length;
     this.#mark = performance.now();
-    const text = await this.#actor.handle('act', cut ? { actions: list.slice(0, left) } : args);
+    const input = cut ? { actions: list.slice(0, left) } : args;
+    const text = waiting ? await this.#actor.act(input) : await this.#actor.handle('act', input);
     const ran = this.attempts.slice(attemptsBefore);
     const okRan = ran.filter((a) => a.ok);
     this.steps.push(...this.#actor.actions.slice(kept));
@@ -389,7 +376,7 @@ class Explorer {
   async #setWidth(args: unknown): Promise<string> {
     this.#log({ event: 'call', tool: 'set_width', args });
     const spent = this.spent();
-    if (spent) return this.#spentMessage(spent);
+    if (spent) return this.#spentMessage();
     const width = Number((args as { width?: unknown })?.width);
     if (!Number.isInteger(width) || width < 320 || width > 2560) return 'set_width needs { width }: whole pixels from 320 to 2560.';
     const started = performance.now();
@@ -502,7 +489,7 @@ export async function explore(project: Project, opts: ExploreOptions = {}): Prom
   try {
     const evidence = new Evidence(runDir, true);
     const model = openModel(project.config.model);
-    const budget = { steps: opts.steps ?? DEFAULT_EXPLORE_STEPS, minutes: opts.minutes ?? DEFAULT_EXPLORE_MINUTES };
+    const budget = { steps: opts.steps ?? DEFAULT_EXPLORE_STEPS };
     const earlier = opts.fresh ? undefined : earlierSessions(project, opts.goal);
     const seed = opts.seed ?? earlier?.count ?? 0;
     const flavour = flavourOf(seed);
@@ -511,7 +498,7 @@ export async function explore(project: Project, opts: ExploreOptions = {}): Prom
     const tools = contextTools(EXPLORER_TOOLS);
     context.header(instructions, tools);
     opts.progress?.(`random seed ${seed}: ${flavour.name}${earlier?.shown.length ? `; told what ${lastSessions(earlier.shown.length)} with these settings found` : ''}`);
-    const threadStarting = model.startThread({ instructions, tools, bounded: true });
+    const threadStarting = model.startThread({ instructions, tools });
     threadStarting.catch(() => {});
     const run = await openRun(project).catch(async (error) => {
       await threadStarting.then((thread) => thread.close()).catch(() => {});
@@ -541,17 +528,16 @@ export async function explore(project: Project, opts: ExploreOptions = {}): Prom
 async function runSession(
   project: Project,
   run: Run,
-  opts: ExploreOptions & { steps: number; minutes: number },
+  opts: ExploreOptions & { steps: number },
   plan: { seed: number; flavour: string; earlier?: Earlier },
   runDir: string,
   threadStarting: Promise<ModelThread>,
   model: { name: string },
   context: ActorContext,
 ): Promise<ExploreSession> {
-  const started = performance.now();
   const log = context.log;
   const progress = opts.progress ?? (() => {});
-  const budget = { steps: opts.steps, minutes: opts.minutes };
+  const budget = { steps: opts.steps };
   const initial = new URL(run.url);
   const start = opts.start ?? initial.pathname + initial.search + initial.hash;
   const { page, opened, viewport } = await openStory(run, { start });
@@ -579,10 +565,7 @@ async function runSession(
     stats: { ms: 0, modelMs: 0, turns: 0, toolCalls: 0, actions: 0, failedActions: 0 },
   };
   if (opts.goal) session.goal = opts.goal;
-  let timedOut = false;
   const modelStarted = performance.now();
-  const deadline = modelStarted + budget.minutes * 60_000;
-  explorer.startClock(deadline);
   try {
     const thread = await threadStarting;
     const onTool: ToolHandler = async (name, args) => {
@@ -600,34 +583,38 @@ async function runSession(
       return text;
     };
     try {
-      await explorer.look();
       const maxDecisions = 4 * opts.steps + 20;
       let finalDecisions = 0, noCalls = 0;
       for (let turn = 0; turn < maxDecisions; turn++) {
-        const left = deadline + FINISH_GRACE_MS - performance.now();
-        if (left <= 0) break;
         session.stats.turns++;
         const snapshot = await page.snapshot({ actor: true });
-        const input = context.input(snapshot, { stepsLeft: Math.max(0, opts.steps - explorer.used), minutesLeft: Math.max(0, Math.round((deadline - performance.now()) / 6000) / 10), decisionsLeft: maxDecisions - turn });
-        const decide = () => decideWithin(thread, input, (name, args) => context.handle(name, args, onTool), left);
+        explorer.observe(snapshot);
+        const input = context.input(snapshot, { stepsLeft: Math.max(0, opts.steps - explorer.used), decisionsLeft: maxDecisions - turn });
+        const decide = () => thread.decide(input, (name, args) => context.handle(name, args, onTool));
         const reply = await (run.evidence ? run.evidence.decision(decide) : decide()).catch(error => context.failure(error));
         context.result(reply);
+        if (reply.tool === 'wait_for') progress('  waiting for the app');
+        const waited = await explorer.completeWait();
+        if (waited) {
+          context.log({ event: 'result', tool: 'wait_for', text: waited.split('\npage ')[0] });
+          progress(`  ${waited.split('\n')[0]}`);
+        }
         noCalls = reply.tool ? 0 : noCalls + 1;
         if (explorer.spent()) finalDecisions++;
         if (explorer.finished || noCalls >= 3 || (explorer.spent() && (!reply.tool || finalDecisions >= 8))) break;
       }
     } catch (error) {
-      if (!(error instanceof Timeout) && (error as Error).message !== 'Actor decision deadline exceeded') { session.error = (error as Error).message; log({ event: 'error', error: session.error }); }
-      else { timedOut = true; log({ event: 'timeout' }); }
+      session.error = (error as Error).message;
+      log({ event: 'error', error: session.error });
     } finally {
       explorer.ended = true;
       await thread.close().catch(() => {});
-      await explorer.settled();
     }
   } finally {
     await page.close();
   }
-  session.stats.modelMs = Math.round(performance.now() - modelStarted);
+  session.stats.waitMs = explorer.waitMs;
+  session.stats.modelMs = Math.max(0, Math.round(performance.now() - modelStarted) - explorer.waitMs);
   session.stats.toolCalls = explorer.calls;
   session.stats.actions = explorer.steps.length;
   session.stats.failedActions = explorer.attempts.filter((a) => !a.ok).length;
@@ -636,6 +623,6 @@ async function runSession(
   if (explorer.finished) {
     session.outcome = 'done';
     session.summary = explorer.finished.summary;
-  } else session.outcome = explorer.spent() ?? (timedOut ? 'minutes' : 'unfinished');
+  } else session.outcome = explorer.spent() ?? 'unfinished';
   return session;
 }

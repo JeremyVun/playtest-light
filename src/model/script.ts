@@ -1,5 +1,5 @@
 import { readFileSync, appendFileSync } from 'node:fs';
-import type { Model, ModelThread, ToolHandler, ToolSpec } from '../types.ts';
+import type { Model, ModelThread, ToolSpec } from '../types.ts';
 
 export type ScriptStep = { tool: string; args?: unknown } | { text: string };
 export type ScriptTurn = ScriptStep[];
@@ -7,8 +7,7 @@ export type ScriptTurn = ScriptStep[];
 export type TranscriptEntry =
   | { event: 'thread'; thread: number; tools: string[] }
   | { event: 'send'; thread: number; turn: number; message: string }
-  | { event: 'tool'; thread: number; turn: number; tool: string; args: unknown; ok: boolean; output: string }
-  | { event: 'text'; thread: number; turn: number; text: string };
+  | { event: 'tool'; thread: number; turn: number; tool: string; args: unknown; ok: boolean; output: string };
 
 export function parseScript(json: string, source = 'script'): ScriptTurn[] {
   let turns: unknown;
@@ -93,37 +92,6 @@ export class ScriptModel implements Model {
           this.record({ event: 'tool', thread, turn, tool: step.tool, args: step.args ?? {}, ok: true, output });
           return { text: output, tool: step.tool, ms: Math.round(performance.now() - started) };
         } finally { busy = false; finish(); }
-      },
-      send: async (message: string, onTool: ToolHandler) => {
-        if (closed) throw new Error('thread is closed');
-        if (busy) throw new Error('a turn is already running on this thread');
-        const steps = this.turns[this.cursor];
-        if (!steps) throw new Error(`${this.name}: no scripted turn left for message ${this.cursor + 1}`);
-        this.cursor++;
-        busy = true;
-        settled = new Promise(resolve => { finish = resolve; });
-        const turn = ++turnInThread;
-        this.record({ event: 'send', thread, turn, message });
-        try {
-          let text = '';
-          for (const step of steps) {
-            if ('text' in step) {
-              text = step.text;
-              this.record({ event: 'text', thread, turn, text });
-              continue;
-            }
-            const args = step.args ?? {};
-            try {
-              const output = await onTool(step.tool, args);
-              this.record({ event: 'tool', thread, turn, tool: step.tool, args, ok: true, output });
-            } catch (error) {
-              this.record({ event: 'tool', thread, turn, tool: step.tool, args, ok: false, output: (error as Error).message });
-            }
-          }
-          return { text };
-        } finally {
-          busy = false; finish();
-        }
       },
       close: async () => {
         closed = true;

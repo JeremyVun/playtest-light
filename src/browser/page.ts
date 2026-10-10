@@ -2,8 +2,9 @@ import type { Action, ActResult, Check, CheckResult, Issue, IssueKind, Locator, 
 import { CdpError, CONNECTION_CLOSED, session, type Connection, type Session } from './cdp.ts';
 import { fingerprintOf } from './fingerprint.ts';
 import { bootScript, pageLib, type LayoutFinding } from './inpage.ts';
+import { waitUntil } from './wait.ts';
 import { keyEvents } from './keys.ts';
-import { buildEntries, collapse, findEntry, locatorFor, normalizedLines, type AXNode, type Entry } from './snapshot.ts';
+import { buildEntries, collapse, findEntry, indexLocators, normalizedLines, type AXNode, type Entry } from './snapshot.ts';
 
 const LIB = pageLib.toString();
 const QUIET_MS = Number(process.env.PLAYTEST_QUIET_MS ?? 50);
@@ -59,6 +60,8 @@ class CdpPage implements Page {
   #url = 'about:blank';
   #inflight = new Map<string, { method: string; url: string; document: boolean }>();
   #loading = false;
+  #closed = new AbortController();
+  #document = 0;
   #lastNetChange = 0;
   #netWaiters = new Set<() => void>();
   #pending: Issue[] = [];
@@ -128,6 +131,7 @@ class CdpPage implements Page {
     });
     on('Page.frameNavigated', (p) => {
       if (p.frame.parentId) return;
+      this.#document++;
       this.#url = p.frame.url + (p.frame.urlFragment ?? '');
       this.#refs.clear();
       this.#refTable.clear();
@@ -222,7 +226,7 @@ class CdpPage implements Page {
       const entry = findEntry(entries, target);
       const label = `${target.role} ${JSON.stringify(target.name)}${target.nth ? ` #${target.nth}` : ''}`;
       if (!entry || entry.backendNodeId === undefined) throw new ActionError(`No ${label} on the page`);
-      found = { backendNodeId: entry.backendNodeId, locator: locatorFor(entries, entries.indexOf(entry)), label };
+      found = { backendNodeId: entry.backendNodeId, locator: indexLocators(entries)[entries.indexOf(entry)], label };
     }
     const res = await this.#s
       .send('DOM.resolveNode', { backendNodeId: found.backendNodeId, objectGroup: 'playtest' })
@@ -422,6 +426,23 @@ class CdpPage implements Page {
 
   async act(action: Action): Promise<ActResult> {
     const started = performance.now();
+    if (action.type === 'wait') {
+      if (!Array.isArray(action.until) || !action.until.length || action.until.length > 8 || !Number.isFinite(action.timeoutMs) || action.timeoutMs <= 0 || action.timeoutMs > 86_400_000)
+        return { ok: false, error: 'Wait needs 1–8 conditions and a timeout of at most 24 hours.', settleMs: 0, issues: [] };
+      const url = this.#url, document = this.#document;
+      const samePage = () => {
+        if (this.#document !== document || this.#url !== url) throw new Error('Page navigated while waiting; inspect the new page before waiting again.');
+      };
+      const result = await waitUntil(async () => {
+        samePage();
+        const entries = action.until.some(c => 'locator' in c) ? (await this.#tree()).entries : undefined;
+        let matched = true;
+        for (const check of action.until) if (!(await this.#check(check, entries)).ok) matched = false;
+        samePage();
+        return matched;
+      }, action.timeoutMs, this.#closed.signal);
+      return { ...result, settleMs: 0, issues: this.#drain() };
+    }
     let locator: Locator | undefined;
     try {
       locator = await this.#perform(action);
@@ -443,13 +464,14 @@ class CdpPage implements Page {
     this.#refTable.clear();
     const text: string[] = [];
     const raw: string[] = [];
+    const locators = indexLocators(entries);
     entries.forEach((entry, index) => {
       const indent = '  '.repeat(entry.depth);
       let ref = '';
       if (entry.actionable && entry.backendNodeId !== undefined) {
         let id = this.#refs.get(entry.backendNodeId);
         if (!id) this.#refs.set(entry.backendNodeId, (id = `e${++this.#nextRef}`));
-        const locator = locatorFor(entries, index);
+        const locator = locators[index];
         this.#refTable.set(id, { backendNodeId: entry.backendNodeId, locator, label: `${entry.role} ${JSON.stringify(entry.name)}` });
         ref = `[${id}] `;
       }
@@ -495,6 +517,10 @@ class CdpPage implements Page {
   }
 
   async check(check: Check): Promise<CheckResult> {
+    return this.#check(check);
+  }
+
+  async #check(check: Check, observed?: Entry[]): Promise<CheckResult> {
     switch (check.type) {
       case 'text': {
         const ok = await this.#evaluate<boolean>('text', check.value);
@@ -507,13 +533,19 @@ class CdpPage implements Page {
       }
       case 'element':
       case 'absent':
+      case 'enabled':
+      case 'disabled':
       case 'value': {
-        const { entries } = await this.#tree();
+        const entries = observed ?? (await this.#tree()).entries;
         const entry = findEntry(entries, check.locator);
         const label = `${check.locator.role} ${JSON.stringify(check.locator.name)}${check.locator.nth ? ` #${check.locator.nth}` : ''}`;
         if (check.type === 'element') return entry ? { ok: true } : { ok: false, detail: `No ${label} on the page` };
         if (check.type === 'absent') return entry ? { ok: false, detail: `${label} is on the page` } : { ok: true };
         if (!entry) return { ok: false, detail: `No ${label} on the page` };
+        if (check.type === 'enabled' || check.type === 'disabled') {
+          const ok = Boolean(entry.disabled) === (check.type === 'disabled');
+          return ok ? { ok } : { ok, detail: `${label} is ${entry.disabled ? 'disabled' : 'enabled'}` };
+        }
         const actual = entry.value ?? entry.checked ?? '';
         return actual === collapse(check.value) ? { ok: true } : { ok: false, detail: `${label} has value ${JSON.stringify(actual)}` };
       }
@@ -559,6 +591,7 @@ class CdpPage implements Page {
   }
 
   async close(): Promise<void> {
+    this.#closed.abort(new Error('Page closed; wait cancelled.'));
     for (const off of this.#offs) off();
     this.#offs = [];
     await this.#connection.send('Target.disposeBrowserContext', { browserContextId: this.#contextId }).catch(() => {});

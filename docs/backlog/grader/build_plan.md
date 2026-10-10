@@ -1,5 +1,8 @@
 # Actor and grader split: build plan
 
+Deferred by the owner, 2026-10-10; do not execute this historical plan. Completion
+stays with the actor. See the updated status in design.md.
+
 Builds `design.md` in this folder, after `docs/backlog/actor-context/` (it rewrites the actor loop this item builds on). Gates for every phase: `npm run
 typecheck` clean, `npm test` green, the phase's live probe. Start sample apps independently on ports 5400+, never 5310; pass their URL and seed command to pt.
 
