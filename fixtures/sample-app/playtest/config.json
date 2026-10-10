@@ -1,0 +1,15 @@
+{
+  "url": "http://127.0.0.1:5310",
+  "seed": "node playtest/reset.ts",
+  "browser": {
+    "viewport": [
+      1280,
+      800
+    ],
+    "widths": [
+      420,
+      1280
+    ],
+    "clock": "2026-04-01T12:00:00Z"
+  }
+}

@@ -1,0 +1,17 @@
+node_modules/
+.DS_Store
+.env
+.env.*
+!.env.example
+.codex/
+.playtest-lite/
+.runs/
+*.log
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.pem
+*.key
+auth.json
+credentials.json

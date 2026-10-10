@@ -1,0 +1,18 @@
+{
+  "name": "playtest-lite",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Record, replay and explore web app stories over raw CDP; artifacts derived, never stored",
+  "bin": { "pt": "bin/playtest.js" },
+  "files": ["bin", "src", "README.md"],
+  "engines": { "node": ">=26" },
+  "scripts": {
+    "test": "node --test 'tests/**/*.test.ts'",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "typescript": "^5.9.0"
+  }
+}
